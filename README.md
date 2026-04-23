@@ -2,6 +2,50 @@
 
 This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
 
+## Requirements
+
+Install these first:
+
+- [Node.js](https://nodejs.org/) (LTS recommended, includes `npm`)
+- [Git](https://git-scm.com/downloads)
+- One way to run the app:
+  - [Expo Go](https://expo.dev/go) on Android/iOS, or
+  - [Android Studio](https://developer.android.com/studio) (for Android emulator)
+
+Optional (OCR AI interpretation):
+
+- [Ollama](https://ollama.com/) + a vision model (for local OCR interpretation), or
+- Google Gemini API key (`GEMINI_API_KEY`) in `.env`
+
+## Dependencies
+
+This project uses npm dependencies declared in `package.json`.
+
+- Install all project dependencies with:
+
+  ```bash
+  npm install
+  ```
+
+- If you need to install/update specific packages manually:
+
+  ```bash
+  npm install @react-native-async-storage/async-storage
+  npx expo install expo-image-picker expo-document-picker
+  ```
+
+- Main runtime dependencies include:
+  - `expo`, `react`, `react-native`, `expo-router`
+  - `expo-image-picker`, `expo-document-picker`
+  - `react-native-webview`, `react-native-gesture-handler`, `react-native-reanimated`
+  - `@react-native-async-storage/async-storage`
+  - `tesseract.js` (OCR)
+
+- Dev dependencies include:
+  - `typescript`
+  - `eslint`, `eslint-config-expo`
+  - type packages such as `@types/react`
+
 ## Get started
 
 1. Install dependencies

@@ -22,7 +22,7 @@
       "predictiveBackGestureEnabled": false
     },
     "web": {
-      "output": "static",
+      "output": "server",
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
@@ -37,6 +37,14 @@
           "dark": {
             "backgroundColor": "#000000"
           }
+        }
+      ],
+      "expo-asset",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "The app needs access to your photos to scan land titles.",
+          "cameraPermission": "The app needs access to your camera to scan land titles."
         }
       ]
     ],
