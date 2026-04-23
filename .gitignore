@@ -37,6 +37,15 @@ yarn-error.*
 # typescript
 *.tsbuildinfo
 
+# User uploads from API; do not commit binaries
+assets/id/*
+!assets/id/.gitkeep
+assets/profilepic/*
+!assets/profilepic/.gitkeep
+assets/temp/request-docs/
+assets/temp/profile-pictures/
+assets/temp/verify-ids/
+
 app-example
 
 # generated native folders

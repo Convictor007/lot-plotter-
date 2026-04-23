@@ -7,7 +7,7 @@ import {
   getGeminiModel,
 } from '@/lib/gemini-survey';
 import { extractJsonObjectFromLlmText, getOllamaBaseUrl, getOllamaModel, ollamaVisionSurveyJson } from '@/lib/ollama-interpret';
-import { normalizeOllamaCornersPayload } from '@/lib/ocr-survey-parse';
+import { extractTiePointReferenceFromLlmPayload, normalizeOllamaCornersPayload } from '@/lib/ocr-survey-parse';
 
 function parseModelJson(rawLlm: string): { parsed: unknown; error: string | null } {
   try {
@@ -83,6 +83,7 @@ export async function POST(req: ExpoRequest) {
     }
 
     const corners = normalizeOllamaCornersPayload(parsed);
+    const tiePointReference = extractTiePointReferenceFromLlmPayload(parsed);
 
     if (corners.length === 0) {
       return Response.json({
@@ -97,9 +98,11 @@ export async function POST(req: ExpoRequest) {
     return Response.json({
       success: true,
       data: corners,
+      tiePointReference,
       source,
       model: modelLabel,
       warnings: [
+        'Line 1 should be from the document tie monument to corner 1; verify tiePointReference and all distances.',
         'Review all values against the document before plotting. Vision models can still make mistakes.',
       ],
     });

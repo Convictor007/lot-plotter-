@@ -1,94 +1,104 @@
-# Welcome to your Expo app 👋
+# iAssess (Lot Plotter)
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+iAssess is an Expo React Native app for plotting lot boundaries from:
+- manual bearing/distance input
+- CSV upload
+- OCR image scan (with validation)
 
-## Requirements
+---
+
+## 1) Requirements
 
 Install these first:
 
 - [Node.js](https://nodejs.org/) (LTS recommended, includes `npm`)
 - [Git](https://git-scm.com/downloads)
-- One way to run the app:
-  - [Expo Go](https://expo.dev/go) on Android/iOS, or
-  - [Android Studio](https://developer.android.com/studio) (for Android emulator)
+- One runtime option:
+  - [Expo Go](https://expo.dev/go) on Android/iOS
+  - [Android Studio Emulator](https://developer.android.com/studio)
 
-Optional (OCR AI interpretation):
+---
 
-- [Ollama](https://ollama.com/) + a vision model (for local OCR interpretation), or
-- Google Gemini API key (`GEMINI_API_KEY`) in `.env`
+## 2) Project Setup
 
-## Dependencies
-
-This project uses npm dependencies declared in `package.json`.
-
-- Install all project dependencies with:
-
-  ```bash
-  npm install
-  ```
-
-- If you need to install/update specific packages manually:
-
-  ```bash
-  npm install @react-native-async-storage/async-storage
-  npx expo install expo-image-picker expo-document-picker
-  ```
-
-- Main runtime dependencies include:
-  - `expo`, `react`, `react-native`, `expo-router`
-  - `expo-image-picker`, `expo-document-picker`
-  - `react-native-webview`, `react-native-gesture-handler`, `react-native-reanimated`
-  - `@react-native-async-storage/async-storage`
-  - `tesseract.js` (OCR)
-
-- Dev dependencies include:
-  - `typescript`
-  - `eslint`, `eslint-config-expo`
-  - type packages such as `@types/react`
-
-## Get started
-
-1. Install dependencies
-
-   ```bash
-   npm install
-   ```
-
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+From project root:
 
 ```bash
-npm run reset-project
+npm install
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Start development server:
 
-## Learn more
+```bash
+npx expo start
+```
 
-To learn more about developing your project with Expo, look at the following resources:
+Useful scripts:
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+```bash
+npm run android
+npm run ios
+npm run web
+npm run lint
+```
 
-## Join the community
+---
 
-Join our community of developers creating universal apps.
+## 3) OCR Modes
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+This project supports two OCR interpretation modes:
+
+### A) Tesseract (default fallback)
+- Route: `/api/ocr`
+- Local OCR + parsing + validation
+- No external API key required
+
+### B) AI Vision Interpretation (recommended for noisy photos)
+- Route: `/api/ocr-interpret`
+- Uses Google Gemini (if configured), otherwise Ollama (if configured)
+
+Priority:
+1. `/api/ocr-interpret`
+2. fallback to `/api/ocr`
+
+---
+
+## 4) Environment Variables
+
+Create `.env` in project root if you want AI interpretation.
+
+### Google Gemini (no local model download)
+
+```env
+GEMINI_API_KEY=your_key_here
+GEMINI_MODEL=gemini-2.5-flash
+```
+
+### Ollama (local model)
+
+```env
+OLLAMA_HOST=http://127.0.0.1:11434
+OLLAMA_MODEL=llava
+```
+
+If both are set, the project prefers Gemini for `/api/ocr-interpret`.
+
+---
+
+## 5) Notes for Scanning Accuracy
+
+For better extraction:
+- fill the frame with the bearing table
+- use good lighting
+- avoid motion blur
+- keep camera parallel to the paper
+
+If OCR output is still wrong, use CSV upload for exact values.
+
+---
+
+## 6) Security Notes
+
+- `.env` is ignored by git and should never be pushed.
+- Review extracted values before plotting/final use.
+

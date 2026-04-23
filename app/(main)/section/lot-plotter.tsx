@@ -1,7 +1,7 @@
 /** iAssess - GIS Lot Plotter. CSV format: NS | Deg | Min | EW | Distance */
 
 import { Ionicons } from '@expo/vector-icons';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -19,10 +19,20 @@ import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapModal from '@/components/gis/MapModal';
+import { ScanReviewModal } from '@/components/ScanReviewModal';
 import gisUtils from '@/utils/gis-utils';
-import tiepointsService, { TiePoint } from '@/services/tiepoints.service';
+import tiepointsService, { TiePoint, findBestTiePointMatch } from '@/services/tiepoints.service';
 import { parseLotCsv } from '@/utils/csv-utils';
-import { extractCornersFromImage } from '@/utils/ocr-utils';
+import type { ParsedCorner, ScanReviewMeta } from '@/utils/ocr-utils';
+import { scanLandTitleImage } from '@/utils/ocr-utils';
+import {
+  isLotExportable,
+  shareLotCsv,
+  shareLotPdf,
+  type LotCornerRow,
+  type LotPolygonExport,
+  type LotTieContext,
+} from '@/utils/lot-export';
 
 import { useTheme } from '@/contexts/ThemeContext';
 
@@ -59,7 +69,28 @@ export default function LotPlotterScreen() {
   const [csvFile, setCsvFile] = useState<string | null>(null);
   const [csvSectionExpanded, setCsvSectionExpanded] = useState(true);
   const [scanModalVisible, setScanModalVisible] = useState(false);
+  const [exportModalVisible, setExportModalVisible] = useState(false);
+  const [scanReviewVisible, setScanReviewVisible] = useState(false);
+  const [reviewCorners, setReviewCorners] = useState<ParsedCorner[]>([]);
+  const [reviewMeta, setReviewMeta] = useState<ScanReviewMeta | null>(null);
+  const [pendingScanLabel, setPendingScanLabel] = useState<string | null>(null);
   const [isOcrProcessing, setIsOcrProcessing] = useState(false);
+  /** Monument / BLLM text extracted from the last successful AI scan (for cross-check with map tie point). */
+  const [documentTieFromScan, setDocumentTieFromScan] = useState<string | null>(null);
+  /** After scan apply: user-visible hint for catalog tie auto-match (or manual pick reminder). */
+  const [autoTieMatchHint, setAutoTieMatchHint] = useState<string | null>(null);
+  /** Best catalog tie for current review modal (from document text). */
+  const [reviewCatalogMatch, setReviewCatalogMatch] = useState<TiePoint | null>(null);
+  /**
+   * When applying scan: select province/municipality/tie from catalog to match document wording.
+   * Consumed inside location `useEffect`s so we do not overwrite with default municipality.
+   */
+  const pendingScanLocationRef = useRef<{
+    province: string;
+    municipality: string;
+    tieId: string;
+  } | null>(null);
+
   const [corners, setCorners] = useState<Corner[]>([]);
   const [polygon, setPolygon] = useState<any>(null);
   const [center, setCenter] = useState({ lat: 13.3155, lng: 123.2328 });
@@ -78,7 +109,10 @@ export default function LotPlotterScreen() {
     if (selectedProvince) {
       const muns = tiepointsService.getMunicipalities(selectedProvince);
       setMunicipalities(muns);
-      if (muns.length > 0) {
+      const pending = pendingScanLocationRef.current;
+      if (pending && pending.province === selectedProvince && muns.includes(pending.municipality)) {
+        setSelectedMunicipality(pending.municipality);
+      } else if (muns.length > 0) {
         const defaultMun = selectedProvince === 'CAMARINES SUR' && muns.includes('BALATAN') ? 'BALATAN' : muns[0];
         setSelectedMunicipality(defaultMun);
       } else {
@@ -91,6 +125,20 @@ export default function LotPlotterScreen() {
     if (selectedProvince && selectedMunicipality) {
       const tps = tiepointsService.getTiePointsByLocation(selectedProvince, selectedMunicipality);
       setTiePoints(tps);
+      const pending = pendingScanLocationRef.current;
+      if (
+        pending &&
+        pending.province === selectedProvince &&
+        pending.municipality === selectedMunicipality
+      ) {
+        const tp = tps.find((t) => t.id === pending.tieId) ?? null;
+        pendingScanLocationRef.current = null;
+        if (tp) {
+          setSelectedTiePoint(tp);
+          setCenter({ lat: tp.lat, lng: tp.lon });
+          return;
+        }
+      }
       if (tps.length > 0) {
         setSelectedTiePoint(tps[0]);
         setCenter({ lat: tps[0].lat, lng: tps[0].lon });
@@ -163,11 +211,15 @@ export default function LotPlotterScreen() {
     generatePolygon(updatedCorners);
   };
 
-  const generatePolygon = (cornerPoints: Corner[]) => {
+  const generatePolygon = (cornerPoints: Corner[], tieForComputation?: TiePoint | null) => {
     if (cornerPoints.length < 3) {
       setPolygon(null);
       return;
     }
+
+    const tp = tieForComputation ?? selectedTiePoint;
+    const originLat = tp != null ? tp.lat : center.lat;
+    const originLng = tp != null ? tp.lon : center.lng;
 
     try {
       const boundaries = cornerPoints.map((corner) => ({
@@ -178,22 +230,22 @@ export default function LotPlotterScreen() {
       }));
 
       const coordinates = gisUtils.generateLotPolygonFromTraverse(
-        center.lat,
-        center.lng,
+        originLat,
+        originLng,
         boundaries,
-        selectedTiePoint?.x,
-        selectedTiePoint?.y,
-        selectedTiePoint?.zone
+        tp?.x,
+        tp?.y,
+        tp?.zone
       );
 
       const { area, perimeter } = gisUtils.calculateLotAreaAndPerimeter(boundaries);
       const closureCheck = gisUtils.checkClosureError(
         boundaries,
-        center.lat,
-        center.lng,
-        selectedTiePoint?.x,
-        selectedTiePoint?.y,
-        selectedTiePoint?.zone
+        originLat,
+        originLng,
+        tp?.x,
+        tp?.y,
+        tp?.zone
       );
 
       setPolygon({
@@ -242,6 +294,8 @@ export default function LotPlotterScreen() {
         try {
           const parsed = await parseLotCsv(fileAsset.uri, (fileAsset as any).file);
           if (parsed.length > 0) {
+            setDocumentTieFromScan(null);
+            setAutoTieMatchHint(null);
             const newCorners = parsed.map((p, idx) => ({
               id: `csv-${Date.now()}-${idx}`,
               line: idx + 1,
@@ -266,29 +320,78 @@ export default function LotPlotterScreen() {
     }
   };
 
+  const applyReviewedCorners = (
+    extractedCorners: ParsedCorner[],
+    sourceFileLabel: string | null,
+    tieFromDocument?: string | null
+  ) => {
+    if (extractedCorners.length === 0) return;
+    const newCorners = extractedCorners.map((p, idx) => ({
+      id: `ocr-${Date.now()}-${idx}`,
+      line: idx + 1,
+      ns: p.ns,
+      deg: p.deg,
+      min: p.min,
+      ew: p.ew,
+      distance: p.distance,
+    }));
+    const t = tieFromDocument?.trim();
+    setDocumentTieFromScan(t && t.length > 0 ? t : null);
+
+    const matched = t ? findBestTiePointMatch(t) : null;
+    if (matched) {
+      pendingScanLocationRef.current = {
+        province: matched.province,
+        municipality: matched.municipality,
+        tieId: matched.id,
+      };
+      setSelectedProvince(matched.province);
+      setSelectedMunicipality(matched.municipality);
+      const sameLoc =
+        selectedProvince === matched.province && selectedMunicipality === matched.municipality;
+      if (sameLoc) {
+        const tps = tiepointsService.getTiePointsByLocation(matched.province, matched.municipality);
+        const tp = tps.find((x) => x.id === matched.id) ?? null;
+        pendingScanLocationRef.current = null;
+        if (tp) {
+          setSelectedTiePoint(tp);
+          setCenter({ lat: tp.lat, lng: tp.lon });
+        }
+      }
+      setAutoTieMatchHint(
+        `Catalog tie applied: ${matched.name}\n${matched.province} · ${matched.municipality}`
+      );
+    } else if (t) {
+      pendingScanLocationRef.current = null;
+      setAutoTieMatchHint(
+        'No catalog match for the document tie — choose Province, Municipality, and Tie Point manually.'
+      );
+    } else {
+      pendingScanLocationRef.current = null;
+      setAutoTieMatchHint(null);
+    }
+
+    setCorners(newCorners);
+    generatePolygon(newCorners, matched ?? undefined);
+    if (sourceFileLabel) {
+      setCsvFile(sourceFileLabel);
+    }
+  };
+
   const processOcrImage = async (uri: string) => {
     setIsOcrProcessing(true);
     try {
-      const extractedCorners = await extractCornersFromImage(uri);
-      
+      const { corners: extractedCorners, meta } = await scanLandTitleImage(uri);
+
       if (extractedCorners.length > 0) {
-        const newCorners = extractedCorners.map((p, idx) => ({
-          id: `ocr-${Date.now()}-${idx}`,
-          line: idx + 1,
-          ns: p.ns,
-          deg: p.deg,
-          min: p.min,
-          ew: p.ew,
-          distance: p.distance,
-        }));
-        setCorners(newCorners);
-        generatePolygon(newCorners);
-        
         const uriParts = uri.split('/');
         const fileName = uriParts[uriParts.length - 1] || 'Scanned_Title.jpg';
-        setCsvFile(`OCR_Result_${fileName}`);
-        
-        Alert.alert('Scan Complete', `Extracted ${extractedCorners.length} lines from the image.`);
+        setPendingScanLabel(`OCR_Result_${fileName}`);
+        setReviewCorners(extractedCorners);
+        setReviewMeta(meta);
+        const docTie = meta.tiePointReference?.trim();
+        setReviewCatalogMatch(docTie ? findBestTiePointMatch(docTie) : null);
+        setScanReviewVisible(true);
       } else {
         Alert.alert('No Data Found', 'Could not detect any survey lines in the image. Please try a clearer image or add manually.');
       }
@@ -346,19 +449,89 @@ export default function LotPlotterScreen() {
     generatePolygon(corners);
   };
 
+  const exportCornerRows: LotCornerRow[] = useMemo(
+    () =>
+      corners.map((c) => ({
+        line: c.line,
+        ns: c.ns,
+        deg: c.deg,
+        min: c.min,
+        ew: c.ew,
+        distance: c.distance,
+      })),
+    [corners]
+  );
+
+  const lotPolygonForExport: LotPolygonExport | null = useMemo(() => {
+    if (!polygon?.coordinates?.length) return null;
+    return {
+      coordinates: polygon.coordinates,
+      area: polygon.area,
+      perimeter: polygon.perimeter,
+      isValid: polygon.isValid,
+      closureError: polygon.closureError,
+    };
+  }, [polygon]);
+
+  const canExportLot = useMemo(
+    () => isLotExportable(exportCornerRows, lotPolygonForExport),
+    [exportCornerRows, lotPolygonForExport]
+  );
+
+  const tieForExport: LotTieContext = useMemo(() => {
+    if (!selectedTiePoint) return null;
+    return {
+      name: selectedTiePoint.name,
+      province: selectedTiePoint.province,
+      municipality: selectedTiePoint.municipality,
+      lat: selectedTiePoint.lat,
+      lon: selectedTiePoint.lon,
+      zone: selectedTiePoint.zone,
+      x: selectedTiePoint.x,
+      y: selectedTiePoint.y,
+    };
+  }, [selectedTiePoint]);
+
+  const closeExportModal = () => setExportModalVisible(false);
+
   const handleExport = () => {
-    if (!polygon) {
-      Alert.alert('Error', 'No plot to export');
+    if (!canExportLot || !lotPolygonForExport) {
+      Alert.alert(
+        'Cannot export yet',
+        'Enter bearings (deg/min, N/S, E/W) and a positive distance (meters) for every survey line, with at least three lines, so the lot boundary can be computed.'
+      );
       return;
     }
-    console.log('Exported:', JSON.stringify({ corners, polygon }, null, 2));
-    Alert.alert('Export Complete', 'Plot data exported');
+    setExportModalVisible(true);
+  };
+
+  const runExportPdf = () => {
+    const rows = exportCornerRows;
+    const poly = lotPolygonForExport;
+    if (!poly) return;
+    closeExportModal();
+    void shareLotPdf(rows, poly, tieForExport, documentTieFromScan).catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      Alert.alert('Export failed', msg);
+    });
+  };
+
+  const runExportCsv = () => {
+    closeExportModal();
+    void shareLotCsv(exportCornerRows).catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      Alert.alert('Export failed', msg);
+    });
   };
 
   const handleNew = () => {
     setCorners([]);
     setPolygon(null);
     setCsvFile(null);
+    setDocumentTieFromScan(null);
+    setAutoTieMatchHint(null);
+    setReviewCatalogMatch(null);
+    pendingScanLocationRef.current = null;
     setShowMap(false);
   };
 
@@ -415,33 +588,121 @@ export default function LotPlotterScreen() {
           <View style={styles.tiePointNameRow}>
             <View style={styles.tiePointNameCol}>
               <TouchableOpacity
-                style={[styles.selectRowFull, { backgroundColor: colors.contentBg, borderColor: colors.border }, tiePoints.length === 0 && styles.disabled]}
+                style={[
+                  styles.selectRowFull,
+                  styles.selectRowTiePoint,
+                  { backgroundColor: colors.contentBg, borderColor: colors.border },
+                  tiePoints.length === 0 && styles.disabled,
+                ]}
                 onPress={() => tiePoints.length && openPicker('tiepoint')}
                 disabled={!tiePoints.length}
                 activeOpacity={0.7}
               >
-                <Text style={[styles.whiteDropdownText, { color: colors.text }]} numberOfLines={3}>
-                  {selectedTiePoint ? selectedTiePoint.name : 'Select Tie Point'}
-                </Text>
-                <Ionicons name="expand-outline" size={20} color="#3b5998" />
+                <View style={styles.tiePointNameTextWrap}>
+                  <Text
+                    style={[styles.tiePointNameText, { color: colors.text }]}
+                    selectable
+                  >
+                    {selectedTiePoint ? selectedTiePoint.name : 'Select Tie Point'}
+                  </Text>
+                </View>
+                <Ionicons name="expand-outline" size={20} color="#3b5998" style={styles.tiePointExpandIcon} />
               </TouchableOpacity>
-              <Text style={styles.tiePointLabel}>Tie Point Name</Text>
+              <Text style={[styles.tiePointLabel, { color: colors.textMuted }]}>Tie Point Name</Text>
             </View>
           </View>
 
           {selectedTiePoint && (
             <View style={[styles.tpDetailsContainer, { backgroundColor: colors.contentBg, borderColor: colors.border }]}>
-              <View style={styles.tpDetailRow}>
-                <Text style={styles.tpDetailText}>Lat: <Text style={[styles.tpDetailValue, { color: colors.text }]}>{selectedTiePoint.lat.toFixed(6)}</Text></Text>
-                <Text style={styles.tpDetailText}>Lon: <Text style={[styles.tpDetailValue, { color: colors.text }]}>{selectedTiePoint.lon.toFixed(6)}</Text></Text>
+              <View style={[styles.tpGridRow, { borderBottomColor: colors.border }]}>
+                <Text style={[styles.tpGridLbl, { color: colors.textMuted }]}>Lat</Text>
+                <Text
+                  style={[styles.tpGridVal, { color: colors.text }]}
+                  selectable
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.65}
+                >
+                  {selectedTiePoint.lat.toFixed(6)}
+                </Text>
+                <Text style={[styles.tpGridLbl, { color: colors.textMuted }]}>Lon</Text>
+                <Text
+                  style={[styles.tpGridVal, { color: colors.text }]}
+                  selectable
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.65}
+                >
+                  {selectedTiePoint.lon.toFixed(6)}
+                </Text>
               </View>
-              <View style={styles.tpDetailRow}>
-                <Text style={styles.tpDetailText}>Zone: <Text style={[styles.tpDetailValue, { color: colors.text }]}>{selectedTiePoint.zone}</Text></Text>
-                <Text style={styles.tpDetailText}>Easting (E): <Text style={[styles.tpDetailValue, { color: colors.text }]}>{selectedTiePoint.x}</Text></Text>
-                <Text style={styles.tpDetailText}>Northing (N): <Text style={[styles.tpDetailValue, { color: colors.text }]}>{selectedTiePoint.y}</Text></Text>
+              <View style={[styles.tpGridRow, { borderBottomColor: colors.border }]}>
+                <Text style={[styles.tpGridLbl, { color: colors.textMuted }]}>Zone</Text>
+                <Text style={[styles.tpGridVal, { color: colors.text }]} selectable>
+                  {String(selectedTiePoint.zone)}
+                </Text>
+                <Text style={[styles.tpGridLbl, { color: colors.textMuted }]}>—</Text>
+                <Text style={[styles.tpGridVal, { color: colors.textMuted }]}>—</Text>
+              </View>
+              <View style={[styles.tpGridRow, { borderBottomColor: colors.border }]}>
+                <Text style={[styles.tpGridLbl, { color: colors.textMuted }]}>E</Text>
+                <Text
+                  style={[styles.tpGridVal, { color: colors.text }]}
+                  selectable
+                  numberOfLines={2}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.6}
+                >
+                  {selectedTiePoint.x}
+                </Text>
+                <Text style={[styles.tpGridLbl, { color: colors.textMuted }]}>N</Text>
+                <Text
+                  style={[styles.tpGridVal, { color: colors.text }]}
+                  selectable
+                  numberOfLines={2}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.6}
+                >
+                  {selectedTiePoint.y}
+                </Text>
+              </View>
+              <View style={[styles.tpGridRow, styles.tpGridRowLast, { borderBottomColor: colors.border }]}>
+                <Text style={[styles.tpGridFoot, { color: colors.textMuted }]} numberOfLines={2}>
+                  PRS92 / TM · E/N in meters
+                </Text>
               </View>
             </View>
           )}
+
+          {documentTieFromScan ? (
+            <View style={[styles.docTieBanner, { backgroundColor: colors.contentBg, borderColor: colors.border }]}>
+              <Text style={[styles.docTieBannerLabel, { color: colors.textMuted }]}>Tie from scanned document</Text>
+              <Text style={[styles.docTieBannerText, { color: colors.text }]}>{documentTieFromScan}</Text>
+              <Text style={[styles.docTieBannerHint, { color: colors.textMuted }]}>
+                Match this to the map tie point above when possible. Line 1 in the table is from this monument to corner 1.
+              </Text>
+            </View>
+          ) : null}
+
+          {autoTieMatchHint ? (
+            <View
+              style={[
+                styles.autoTieHintBanner,
+                {
+                  backgroundColor: colors.contentBg,
+                  borderColor: autoTieMatchHint.startsWith('Catalog') ? colors.success : colors.warning,
+                },
+              ]}
+            >
+              <Ionicons
+                name={autoTieMatchHint.startsWith('Catalog') ? 'checkmark-circle' : 'alert-circle-outline'}
+                size={20}
+                color={autoTieMatchHint.startsWith('Catalog') ? colors.success : colors.warning}
+                style={{ marginRight: 8 }}
+              />
+              <Text style={[styles.autoTieHintText, { color: colors.text }]}>{autoTieMatchHint}</Text>
+            </View>
+          ) : null}
         </View>
 
         {/* CSV Upload Section - Dropdown */}
@@ -477,7 +738,16 @@ export default function LotPlotterScreen() {
                     <Text style={[styles.fileName, { color: colors.text }]} numberOfLines={2}>
                       {csvFile}
                     </Text>
-                    <TouchableOpacity onPress={() => { setCsvFile(null); setCorners([]); setPolygon(null); }} style={styles.clearFileBtn}>
+                    <TouchableOpacity
+                      onPress={() => {
+                        setCsvFile(null);
+                        setCorners([]);
+                        setPolygon(null);
+                        setDocumentTieFromScan(null);
+                        setAutoTieMatchHint(null);
+                      }}
+                      style={styles.clearFileBtn}
+                    >
                       <Ionicons name="close-circle" size={18} color="#dc3545" />
                     </TouchableOpacity>
                   </View>
@@ -617,7 +887,11 @@ export default function LotPlotterScreen() {
           </View>
           
           <View style={styles.actionButtonGroup}>
-            <TouchableOpacity style={styles.yellowBtn} onPress={handleExport}>
+            <TouchableOpacity
+              style={[styles.yellowBtn, !canExportLot && styles.btnDisabled]}
+              onPress={handleExport}
+              disabled={!canExportLot}
+            >
               <Text style={styles.yellowBtnText}>Export</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.newBtn} onPress={handleNew}>
@@ -740,6 +1014,82 @@ export default function LotPlotterScreen() {
         area={polygon?.area}
         showAreaLabel={true}
       />
+
+      <ScanReviewModal
+        visible={scanReviewVisible}
+        corners={reviewCorners}
+        meta={reviewMeta}
+        catalogMatch={reviewCatalogMatch}
+        onDismiss={() => {
+          setScanReviewVisible(false);
+          setReviewCorners([]);
+          setReviewMeta(null);
+          setReviewCatalogMatch(null);
+          setPendingScanLabel(null);
+        }}
+        onApply={(finalCorners) => {
+          applyReviewedCorners(finalCorners, pendingScanLabel, reviewMeta?.tiePointReference);
+          setScanReviewVisible(false);
+          setReviewCorners([]);
+          setReviewMeta(null);
+          setReviewCatalogMatch(null);
+          setPendingScanLabel(null);
+        }}
+      />
+
+      {/* Export format (PDF / CSV) */}
+      <Modal
+        visible={exportModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeExportModal}
+      >
+        <View style={styles.scanModalOverlay}>
+          <View style={[styles.scanModalContent, { backgroundColor: colors.cardBg, borderWidth: 1, borderColor: colors.border }]}>
+            <View style={styles.scanModalHeader}>
+              <Text style={[styles.scanModalTitle, { color: colors.text }]}>Export lot</Text>
+              <TouchableOpacity onPress={closeExportModal} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Ionicons name="close" size={24} color={colors.text} />
+              </TouchableOpacity>
+            </View>
+            <Text style={[styles.exportModalDesc, { color: colors.textMuted }]}>
+              Choose a file format. PDF includes a map image (when a Maps API key is configured), tie details, and the traverse table.
+              {Platform.OS === 'web' ?
+                ' On the web, the PDF downloads directly (html2canvas + jsPDF), so the file does not include browser URL or date headers. Do not use the browser Print dialog for export if you want a clean PDF.'
+              : ''}
+            </Text>
+            <TouchableOpacity
+              style={[styles.exportFormatRow, { backgroundColor: colors.contentBg, borderColor: colors.border }]}
+              onPress={runExportPdf}
+              activeOpacity={0.75}
+            >
+              <Ionicons name="document-text-outline" size={26} color="#3b5998" />
+              <View style={styles.exportFormatTextCol}>
+                <Text style={[styles.exportFormatTitle, { color: colors.text }]}>PDF report</Text>
+                <Text style={[styles.exportFormatSub, { color: colors.textMuted }]}>
+                  {Platform.OS === 'web' ? 'Download PDF (map + table)' : 'Map snapshot, summary, bearings table'}
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.exportFormatRow, { backgroundColor: colors.contentBg, borderColor: colors.border }]}
+              onPress={runExportCsv}
+              activeOpacity={0.75}
+            >
+              <Ionicons name="grid-outline" size={26} color="#3b5998" />
+              <View style={styles.exportFormatTextCol}>
+                <Text style={[styles.exportFormatTitle, { color: colors.text }]}>CSV (traverse)</Text>
+                <Text style={[styles.exportFormatSub, { color: colors.textMuted }]}>Line, N/S, deg, min, E/W, distance (m)</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.exportModalCancelWrap} onPress={closeExportModal} activeOpacity={0.7}>
+              <Text style={[styles.exportModalCancelText, { color: colors.textMuted }]}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* Upload File Modal */}
       <Modal
@@ -879,6 +1229,24 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     minHeight: 48,
   },
+  /** Full-width tie name: text wraps vertically; icon stays top-right */
+  selectRowTiePoint: {
+    alignItems: 'flex-start',
+    minHeight: 52,
+  },
+  tiePointNameTextWrap: {
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 10,
+  },
+  tiePointNameText: {
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '500',
+  },
+  tiePointExpandIcon: {
+    marginTop: 2,
+  },
   whiteDropdown: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -980,24 +1348,86 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
   tpDetailsContainer: {
-    padding: 10,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
     marginHorizontal: 12,
     marginBottom: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  /** 4 columns × 4 rows — compact tie point coordinates */
+  tpGridRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 28,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  tpGridLbl: {
+    width: '18%',
+    maxWidth: 44,
+    fontSize: 10,
+    fontWeight: '700',
+    paddingVertical: 4,
+    paddingLeft: 6,
+    paddingRight: 2,
+  },
+  tpGridVal: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 11,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+    paddingVertical: 4,
+    paddingRight: 4,
+  },
+  tpGridRowLast: {
+    borderBottomWidth: 0,
+    minHeight: 26,
+  },
+  tpGridFoot: {
+    flex: 1,
+    fontSize: 9,
+    fontWeight: '500',
+    textAlign: 'center',
+    paddingVertical: 5,
+    paddingHorizontal: 6,
+    lineHeight: 12,
+  },
+  docTieBanner: {
+    marginHorizontal: 12,
+    marginBottom: 12,
+    padding: 10,
     borderRadius: 6,
     borderWidth: 1,
   },
-  tpDetailRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+  docTieBannerLabel: {
+    fontSize: 11,
+    fontWeight: '600',
     marginBottom: 4,
   },
-  tpDetailText: {
-    color: '#666',
-    fontSize: 11,
+  docTieBannerText: {
+    fontSize: 13,
+    lineHeight: 18,
   },
-  tpDetailValue: {
-    color: '#333',
-    fontWeight: 'bold',
+  docTieBannerHint: {
+    fontSize: 10,
+    marginTop: 8,
+    lineHeight: 14,
+  },
+  autoTieHintBanner: {
+    marginHorizontal: 12,
+    marginBottom: 12,
+    padding: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  autoTieHintText: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 18,
   },
   uploadRow: {
     flexDirection: 'row',
@@ -1248,6 +1678,43 @@ const styles = StyleSheet.create({
   scanActionText: {
     marginTop: 8,
     fontSize: 14,
+    fontWeight: '600',
+  },
+  exportModalDesc: {
+    fontSize: 13,
+    lineHeight: 20,
+    marginBottom: 16,
+  },
+  exportFormatRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    marginBottom: 10,
+    gap: 4,
+  },
+  exportFormatTextCol: {
+    flex: 1,
+    marginLeft: 10,
+    minWidth: 0,
+  },
+  exportFormatTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  exportFormatSub: {
+    fontSize: 12,
+    marginTop: 2,
+  },
+  exportModalCancelWrap: {
+    alignItems: 'center',
+    paddingVertical: 14,
+    marginTop: 4,
+  },
+  exportModalCancelText: {
+    fontSize: 15,
     fontWeight: '600',
   },
   scanBtn: {

@@ -1,19 +1,24 @@
 /** iAssess - GIS Map Modal. Boundary = municipality; boundaryGeoJson = barangays. */
 
 import { Ionicons } from '@expo/vector-icons';
-import React, { useState } from 'react';
+import React, { useImperativeHandle, useRef, useState, forwardRef } from 'react';
 import {
   Modal,
   Platform,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
+import { captureRef } from 'react-native-view-shot';
 import MapView from '@/components/gis/MapView';
 import ArcGISCompareMap from '@/components/gis/ArcGISCompareMap';
+
+export type MapModalHandle = {
+  /** PNG data URI of the map area (labels, polygon, compass), for PDF embed. */
+  captureForPdf: () => Promise<string | null>;
+};
 
 const COLORS = {
   accent: '#3b5998',
@@ -83,18 +88,49 @@ interface MapModalProps {
   area?: number;
   showAreaLabel?: boolean;
   showMapControls?: boolean;
+  /** When true, show header action to export PDF using a live map screenshot. */
+  exportPdfEnabled?: boolean;
+  onExportPdfFromMap?: () => void | Promise<void>;
 }
 
-export default function MapModal({
-  visible,
-  onClose,
-  center,
-  zoom = 17,
-  polygon,
-  area,
-  showAreaLabel = true,
-  showMapControls = true,
-}: MapModalProps) {
+const MapModal = forwardRef<MapModalHandle, MapModalProps>(function MapModal(
+  {
+    visible,
+    onClose,
+    center,
+    zoom = 17,
+    polygon,
+    area,
+    showAreaLabel = true,
+    showMapControls = true,
+    exportPdfEnabled = false,
+    onExportPdfFromMap,
+  },
+  ref
+) {
+  const mapCaptureRef = useRef<View>(null);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      async captureForPdf(): Promise<string | null> {
+        if (!mapCaptureRef.current) return null;
+        try {
+          await new Promise((r) => setTimeout(r, 400));
+          const uri = await captureRef(mapCaptureRef, {
+            format: 'png',
+            quality: 0.92,
+            result: 'data-uri',
+            snapshotContentContainer: false,
+          });
+          return typeof uri === 'string' && uri.startsWith('data:image') ? uri : null;
+        } catch {
+          return null;
+        }
+      },
+    }),
+    []
+  );
   const [showSettings, setShowSettings] = useState(false);
   const [showArea, setShowArea] = useState(showAreaLabel);
   const [showDistance, setShowDistance] = useState(true);
@@ -160,9 +196,21 @@ export default function MapModal({
               <Text style={styles.historicalBtnText}>{isCompareMode ? 'View Normal Map' : 'Historical Compare'}</Text>
             </TouchableOpacity>
           </View>
-          <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
-            <Ionicons name="close" size={28} color={COLORS.text} />
-          </TouchableOpacity>
+          <View style={styles.headerRight}>
+            {exportPdfEnabled && onExportPdfFromMap ? (
+              <TouchableOpacity
+                style={styles.exportPdfBtn}
+                onPress={() => void Promise.resolve(onExportPdfFromMap())}
+                accessibilityRole="button"
+                accessibilityLabel="Export PDF with map screenshot"
+              >
+                <Ionicons name="document-text-outline" size={22} color={COLORS.text} />
+              </TouchableOpacity>
+            ) : null}
+            <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
+              <Ionicons name="close" size={28} color={COLORS.text} />
+            </TouchableOpacity>
+          </View>
         </View>
 
         {showSettings && (
@@ -204,36 +252,40 @@ export default function MapModal({
         )}
 
         <View style={styles.mapWrapper}>
-          {isCompareMode ? (
-            <ArcGISCompareMap
-              center={latestCenterRef.current}
-              zoom={latestZoomRef.current}
-              polygon={mapPolygon}
-              showAreaLabel={showArea}
-              showDistanceLabel={showDistance}
-              area={area}
-              onRegionChange={handleRegionChange}
-            />
-          ) : (
-            <MapView 
-              center={latestCenterRef.current} 
-              zoom={latestZoomRef.current} 
-              polygon={mapPolygon} 
-              boundary={mapBoundary} 
-              boundaryGeoJson={balatanBarangaysGeoJson} 
-              style={styles.map} 
-              showControls={showMapControls} 
-              area={area} 
-              showAreaLabel={showArea}
-              showDistanceLabel={showDistance}
-              onRegionChange={handleRegionChange}
-            />
-          )}
+          <View ref={mapCaptureRef} style={styles.mapCaptureShell} collapsable={false}>
+            {isCompareMode ? (
+              <ArcGISCompareMap
+                center={latestCenterRef.current}
+                zoom={latestZoomRef.current}
+                polygon={mapPolygon}
+                showAreaLabel={showArea}
+                showDistanceLabel={showDistance}
+                area={area}
+                onRegionChange={handleRegionChange}
+              />
+            ) : (
+              <MapView
+                center={latestCenterRef.current}
+                zoom={latestZoomRef.current}
+                polygon={mapPolygon}
+                boundary={mapBoundary}
+                boundaryGeoJson={balatanBarangaysGeoJson}
+                style={styles.map}
+                showControls={showMapControls}
+                area={area}
+                showAreaLabel={showArea}
+                showDistanceLabel={showDistance}
+                onRegionChange={handleRegionChange}
+              />
+            )}
+          </View>
         </View>
       </View>
     </Modal>
   );
-}
+});
+
+export default MapModal;
 
 const styles = StyleSheet.create({
   container: {
@@ -278,8 +330,24 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: 'bold',
   },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  exportPdfBtn: {
+    padding: 6,
+    marginRight: 4,
+  },
   closeBtn: {
     padding: 4,
+  },
+  mapCaptureShell: {
+    flex: 1,
+    width: '100%',
+    minHeight: 300,
+    borderRadius: 12,
+    overflow: 'hidden',
   },
   settingsDropdown: {
     position: 'absolute',

@@ -117,7 +117,7 @@ export default function RegisterScreen() {
                 
                 <View style={styles.formHeader}>
                   <View style={styles.smallLogoPlaceholder}>
-                     <Image source={LOGO_IASSESS} style={styles.smallLogo} resizeMode="contain" />
+                    <Image source={LOGO_IASSESS} style={styles.smallLogo} resizeMode="contain" />
                   </View>
                   <Text style={styles.formHeaderText}>BALATAN MUNICIPAL{'\n'}ASSESSOR WEBSITE</Text>
                 </View>
@@ -398,19 +398,19 @@ const styles = StyleSheet.create({
     elevation: 10,
   },
   formHeader: {
-    flexDirection: 'row',
+    flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 30,
   },
   smallLogoPlaceholder: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 80,
+    height: 80,
+    borderRadius: 40,
     backgroundColor: 'rgba(59, 89, 152, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 12,
+    marginBottom: 12,
     overflow: 'hidden',
   },
   smallLogo: {
@@ -421,6 +421,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: 'bold',
     color: COLORS.text,
+    textAlign: 'center',
   },
   formTitle: {
     fontSize: 22,

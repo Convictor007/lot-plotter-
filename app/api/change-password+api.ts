@@ -1,51 +1,72 @@
-import { MOCK_LOGIN_EMAIL, MOCK_LOGIN_PASSWORD } from '@/constants/mockAuth';
-import { ExpoRequest, ExpoResponse } from 'expo-router/server';
+import * as bcrypt from 'bcryptjs';
 
-export async function POST(req: ExpoRequest) {
+import { MOCK_LOGIN_EMAIL, MOCK_LOGIN_PASSWORD } from '@/constants/mockAuth';
+import { isDbConfigured } from '@/lib/db/client';
+import { clientIpFromRequest, insertAuditLog } from '@/lib/repositories/audit-logs.repository';
+import { findUserByEmail, updatePasswordHash } from '@/lib/repositories/users.repository';
+
+export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const { email, currentPassword, newPassword } = body as {
+    const body = (await req.json()) as {
       email?: string;
       currentPassword?: string;
       newPassword?: string;
     };
+    const { email, currentPassword, newPassword } = body;
 
     if (!email || !currentPassword || !newPassword) {
-      return ExpoResponse.json(
+      return Response.json(
         { success: false, message: 'Email, current password, and new password are required.' },
         { status: 400 }
       );
     }
 
     if (newPassword.length < 6) {
-      return ExpoResponse.json(
+      return Response.json(
         { success: false, message: 'New password must be at least 6 characters.' },
         { status: 400 }
       );
     }
 
     if (currentPassword === newPassword) {
-      return ExpoResponse.json(
+      return Response.json(
         { success: false, message: 'New password must be different from your current password.' },
         { status: 400 }
       );
     }
 
-    if (email === MOCK_LOGIN_EMAIL && currentPassword !== MOCK_LOGIN_PASSWORD) {
-      return ExpoResponse.json(
-        { success: false, message: 'Current password is incorrect.' },
-        { status: 401 }
-      );
+    if (isDbConfigured()) {
+      const user = await findUserByEmail(email);
+      if (!user || !(await bcrypt.compare(currentPassword, user.password_hash))) {
+        return Response.json({ success: false, message: 'Current password is incorrect.' }, { status: 401 });
+      }
+      const hash = await bcrypt.hash(newPassword, 10);
+      await updatePasswordHash(user.User_id, hash);
+      try {
+        await insertAuditLog({
+          user_id: user.User_id,
+          action: 'user.password_change',
+          ip_address: clientIpFromRequest(req),
+          user_agent: req.headers.get('user-agent'),
+          details: {},
+        });
+      } catch {
+        //
+      }
+      return Response.json({ success: true, message: 'Password updated successfully.' });
     }
 
-    // Replace with your backend: verify session, hash new password, persist via your auth service.
-    return ExpoResponse.json({
+    if (email === MOCK_LOGIN_EMAIL && currentPassword !== MOCK_LOGIN_PASSWORD) {
+      return Response.json({ success: false, message: 'Current password is incorrect.' }, { status: 401 });
+    }
+
+    return Response.json({
       success: true,
-      message: 'Password updated successfully.',
+      message: 'Password updated successfully. (Demo mode — database not configured.)',
     });
   } catch (error) {
     console.error('change-password:', error);
-    return ExpoResponse.json(
+    return Response.json(
       { success: false, message: 'Something went wrong. Please try again.' },
       { status: 500 }
     );

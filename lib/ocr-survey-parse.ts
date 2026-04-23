@@ -152,6 +152,39 @@ export function toValidatedCorner(
   };
 }
 
+/** Monument / BLLM / cadastral tie text from LLM JSON (optional). */
+export function extractTiePointReferenceFromLlmPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const o = payload as Record<string, unknown>;
+  const tryString = (v: unknown): string | null => {
+    if (typeof v !== 'string') return null;
+    const s = v.trim();
+    if (!s || /^null$/i.test(s)) return null;
+    return s.length > 500 ? s.slice(0, 500) : s;
+  };
+
+  const direct = tryString(o.tiePointReference) ?? tryString(o.tie_point_reference);
+  if (direct) return direct;
+
+  if (typeof o.tiePoint === 'string') {
+    const s = tryString(o.tiePoint);
+    if (s) return s;
+  }
+
+  if (o.tiePoint && typeof o.tiePoint === 'object') {
+    const t = o.tiePoint as Record<string, unknown>;
+    const nested =
+      tryString(t.reference) ??
+      tryString(t.monument) ??
+      tryString(t.description) ??
+      tryString(t.name) ??
+      tryString(t.label);
+    if (nested) return nested;
+  }
+
+  return tryString(o.monument) ?? tryString(o.tieFrom) ?? null;
+}
+
 /** Parse `{ corners: [...] }` from Ollama / LLM JSON; re-number lines 1..n. */
 export function normalizeOllamaCornersPayload(payload: unknown): ParsedCornerRow[] {
   if (!payload || typeof payload !== 'object') return [];

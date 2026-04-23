@@ -159,6 +159,86 @@ export const searchTiePoints = (query: string): TiePoint[] => {
   );
 };
 
+/** BLIM = common OCR misread of BLLM */
+const MONUMENT_NUM_RE = /\b(?:BLLM|BBM|BLBM|BLIM)\s*NO\.?\s*(\d+)\b/i;
+
+/** Short words that should not drive fuzzy matching alone. */
+const DOC_TOKEN_STOP = new Set([
+  'the',
+  'and',
+  'from',
+  'for',
+  'not',
+  'are',
+  'cad',
+  'being',
+  'point',
+  'marked',
+  'plan',
+  'more',
+  'less',
+]);
+
+function tokenizeDocForMatch(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !DOC_TOKEN_STOP.has(w));
+}
+
+/**
+ * Pick the best tie point row for text from a land title (e.g. "BLLM No. 9, Tacloban Cad.").
+ * Uses monument number + place-name overlap; returns null if confidence is low.
+ */
+export function findBestTiePointMatch(documentTieText: string | null | undefined): TiePoint | null {
+  if (!documentTieText?.trim()) return null;
+
+  const raw = documentTieText.trim();
+  const lower = raw.toLowerCase();
+
+  const numMatch = raw.match(MONUMENT_NUM_RE);
+  const monumentNum = numMatch ? numMatch[1] : null;
+
+  const tiePoints = getTiePoints();
+  let best: TiePoint | null = null;
+  let bestScore = -1;
+
+  for (const tp of tiePoints) {
+    const nameLower = tp.name.toLowerCase();
+    const munLower = tp.municipality.toLowerCase();
+    const provLower = tp.province.toLowerCase();
+    const haystack = `${nameLower} ${munLower} ${provLower}`;
+
+    let score = 0;
+
+    if (monumentNum) {
+      const monumentRe = new RegExp(`(?:bllm|bbm|blbm|blim)\\s*no\\.?\\s*${monumentNum}\\b`, 'i');
+      if (monumentRe.test(tp.name)) score += 85;
+      else if (/(?:bllm|bbm|blbm|blim)\s*no\.?\s*\d+/i.test(tp.name)) score -= 45;
+    }
+
+    if (lower.includes(munLower) || raw.toUpperCase().includes(tp.municipality)) score += 35;
+    if (lower.includes(provLower) || raw.toUpperCase().includes(tp.province)) score += 18;
+
+    const tokens = tokenizeDocForMatch(raw);
+    let tokenHits = 0;
+    for (const t of tokens) {
+      if (haystack.includes(t)) tokenHits += 1;
+    }
+    score += Math.min(tokenHits * 6, 24);
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = tp;
+    }
+  }
+
+  /** Need a clear signal (number match or strong place + tokens). */
+  if (!best || bestScore < 42) return null;
+  return best;
+}
+
 /**
  * Get a tie point by ID
  */
@@ -233,4 +313,5 @@ export default {
   searchTiePoints,
   getTiePointById,
   getNearestTiePoint,
+  findBestTiePointMatch,
 };

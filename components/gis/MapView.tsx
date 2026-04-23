@@ -126,6 +126,10 @@ const PREVIEW_ZOOM = 11;
 const PREVIEW_W = 160;
 const PREVIEW_H = 100;
 
+const COMPASS_PNG = require('../../assets/images/compass2.png');
+/** Compass overlay size in the WebView map (2× former 68px). */
+const COMPASS_DISPLAY_PX = 136;
+
 /** Minimap thumbnail from Google Static Maps API. */
 function buildBasemapPreviewUri(
   basemap: BasemapStyle,
@@ -557,6 +561,18 @@ function NativeMapViewGoogleWebView({
       area: area !== undefined && area !== null ? area : null,
     });
 
+    const compassUri = Image.resolveAssetSource(COMPASS_PNG)?.uri;
+    const compassMarkup = compassUri
+      ? `<img id="map-compass" src="${compassUri}" alt="" />`
+      : `<svg id="map-compass" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${COMPASS_DISPLAY_PX} ${COMPASS_DISPLAY_PX}" aria-hidden="true">
+          <circle cx="68" cy="68" r="62" fill="rgba(255,255,255,0.94)" stroke="#333" stroke-width="2.4"/>
+          <text x="68" y="32" text-anchor="middle" fill="#111" font-size="24" font-weight="bold" font-family="system-ui,sans-serif">N</text>
+          <text x="112" y="76" text-anchor="middle" fill="#333" font-size="20" font-weight="600" font-family="system-ui,sans-serif">E</text>
+          <text x="68" y="120" text-anchor="middle" fill="#333" font-size="20" font-weight="600" font-family="system-ui,sans-serif">S</text>
+          <text x="24" y="76" text-anchor="middle" fill="#333" font-size="20" font-weight="600" font-family="system-ui,sans-serif">W</text>
+          <path d="M 68 44 L 58 72 L 66 72 L 66 96 L 70 96 L 70 72 L 78 72 Z" fill="#b91c1c" stroke="#7f1d1d" stroke-width="1"/>
+        </svg>`;
+
     return `
       <!DOCTYPE html>
       <html>
@@ -564,11 +580,20 @@ function NativeMapViewGoogleWebView({
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
         <style>
           body { margin: 0; padding: 0; background: #f3f6f9; }
-          #map { width: 100%; height: 100vh; }
+          #map-shell { position: relative; width: 100%; height: 100vh; }
+          #map { width: 100%; height: 100%; }
+          #map-compass {
+            position: absolute; top: 12px; right: 12px; z-index: 5;
+            width: ${COMPASS_DISPLAY_PX}px; height: ${COMPASS_DISPLAY_PX}px; pointer-events: none;
+            filter: drop-shadow(0 1px 2px rgba(0,0,0,0.35));
+          }
         </style>
       </head>
       <body>
+        <div id="map-shell">
         <div id="map"></div>
+        ${compassMarkup}
+        </div>
         <script>
           function calcDist(lat1, lon1, lat2, lon2) {
             var R = 6371000;

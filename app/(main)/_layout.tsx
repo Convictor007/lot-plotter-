@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { usePathname, useRouter } from 'expo-router';
 import { Tabs } from 'expo-router';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -12,11 +12,17 @@ import {
   Platform,
   Pressable,
   Modal,
+  ActivityIndicator,
+  StatusBar,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ScreenSafeArea } from '@/components/ScreenSafeArea';
 import Animated, { useAnimatedStyle, withTiming } from 'react-native-reanimated';
+import type { PublicUserJson } from '@/database/models';
 import { MOCK_LOGIN_EMAIL } from '@/constants/mockAuth';
-import { clearAuthSession } from '@/lib/authSession';
+import { useAuthenticatedImageDataUri } from '@/hooks/useAuthenticatedImageDataUri';
+import { apiUrl } from '@/lib/api/api-url';
+import { clearAuthSession, getAuthToken } from '@/lib/authSession';
 import { useTheme } from '@/contexts/ThemeContext';
 import { NewRequestProvider, useNewRequest } from '@/contexts/NewRequestContext';
 
@@ -122,14 +128,79 @@ function MenuItem({ item, isActive, isCollapsed, onPress, onChildPress, currentR
 }
 
 function MainLayout() {
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
   const { isDarkMode, toggleTheme, colors } = useTheme();
   const isSmallScreen = width < 768;
+  /** Drawer width in dp scales with window width (not physical px); keeps layout sane on narrow/wide phones. */
+  const phoneDrawerWidth = useMemo(() => {
+    if (!isSmallScreen) return SIDEBAR_EXPANDED_WIDTH;
+    const target = Math.round(width * 0.82);
+    return Math.min(300, Math.max(220, Math.min(target, width - 12)));
+  }, [isSmallScreen, width]);
+  const compactPhoneChrome = isSmallScreen && height < 640;
   const [isSidebarOpen, setIsSidebarOpen] = useState(!isSmallScreen);
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isLogoutModalVisible, setLogoutModalVisible] = useState(false);
   const pathname = usePathname();
   const router = useRouter();
+  const safeInsets = useSafeAreaInsets();
+
+  /** Absolute drawer ignores parent SafeAreaView padding on some Android builds — pad explicitly. */
+  const drawerSafePadding = useMemo(() => {
+    if (!isSmallScreen) return undefined;
+    const androidStatus = Platform.OS === 'android' ? (StatusBar.currentHeight ?? 0) : 0;
+    return {
+      paddingTop: Math.max(safeInsets.top, androidStatus),
+      paddingBottom: safeInsets.bottom,
+    };
+  }, [isSmallScreen, safeInsets.top, safeInsets.bottom]);
+
+  const [sessionUser, setSessionUser] = useState<PublicUserJson | null>(null);
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const t = await getAuthToken();
+      if (!alive) return;
+      setSessionToken(t);
+      if (!t) {
+        setSessionUser(null);
+        return;
+      }
+      try {
+        const res = await fetch(apiUrl('/api/users/me'), {
+          headers: { Authorization: `Bearer ${t}` },
+        });
+        const json = (await res.json()) as { success?: boolean; user?: PublicUserJson };
+        if (!alive) return;
+        if (res.ok && json.success && json.user) setSessionUser(json.user);
+        else setSessionUser(null);
+      } catch {
+        if (!alive) return;
+        setSessionUser(null);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [pathname]);
+
+  const { uri: sidebarAvatarUri, loading: sidebarAvatarLoading } = useAuthenticatedImageDataUri(
+    sessionUser?.profile_picture_url,
+    Boolean(sessionUser?.has_profile_picture),
+    sessionToken,
+    sessionUser?.updated_at ?? ''
+  );
+
+  const sidebarDisplayName = sessionUser
+    ? `${sessionUser.first_name} ${sessionUser.last_name}`.trim() || sessionUser.email.split('@')[0]
+    : MOCK_LOGIN_EMAIL.split('@')[0];
+  const sidebarDisplayEmail = sessionUser?.email ?? MOCK_LOGIN_EMAIL;
+  const sidebarInitials =
+    sessionUser?.first_name && sessionUser?.last_name
+      ? `${sessionUser.first_name.charAt(0)}${sessionUser.last_name.charAt(0)}`.toUpperCase()
+      : (sessionUser?.email ?? MOCK_LOGIN_EMAIL).slice(0, 2).toUpperCase();
 
   // Auto-close or collapse based on screen size
   useEffect(() => {
@@ -171,9 +242,9 @@ function MainLayout() {
     if (isSmallScreen) {
       return {
         transform: [
-          { translateX: withTiming(isSidebarOpen ? 0 : -SIDEBAR_EXPANDED_WIDTH, { duration: 300 }) }
+          { translateX: withTiming(isSidebarOpen ? 0 : -phoneDrawerWidth, { duration: 300 }) }
         ],
-        width: SIDEBAR_EXPANDED_WIDTH,
+        width: phoneDrawerWidth,
       };
     } else {
       return {
@@ -181,7 +252,7 @@ function MainLayout() {
         transform: [{ translateX: 0 }],
       };
     }
-  });
+  }, [isSmallScreen, isSidebarOpen, isCollapsed, phoneDrawerWidth]);
 
   const getCurrentTitle = () => {
     for (const item of MENU_ITEMS) {
@@ -201,17 +272,36 @@ function MainLayout() {
   return (
     <ScreenSafeArea style={[styles.container, { backgroundColor: colors.contentBg }]} edges={['top', 'right', 'bottom', 'left']}>
       {/* Sidebar */}
-      <Animated.View style={[
-        styles.sidebar, 
-        { backgroundColor: colors.sidebarBg },
-        isSmallScreen && styles.sidebarAbsolute,
-        sidebarAnimatedStyle
-      ]}>
-        <View style={[styles.sidebarHeader, isCollapsed && styles.sidebarHeaderCollapsed]}>
+      <Animated.View
+        style={[
+          styles.sidebar,
+          { backgroundColor: colors.sidebarBg },
+          isSmallScreen && styles.sidebarAbsolute,
+          drawerSafePadding,
+          sidebarAnimatedStyle,
+        ]}
+      >
+        <View
+          style={[
+            styles.sidebarHeader,
+            isCollapsed && styles.sidebarHeaderCollapsed,
+            !isCollapsed && { justifyContent: isSmallScreen ? 'space-between' : 'center' },
+            compactPhoneChrome && styles.sidebarHeaderCompact,
+          ]}
+        >
           {!isCollapsed ? (
             <View style={styles.logoWrap}>
-              <Image source={IASSESS_LOGO} style={styles.logoImage} resizeMode="contain" />
-              <Text style={styles.logoText} numberOfLines={1}>iAssess</Text>
+              <Image
+                source={IASSESS_LOGO}
+                style={compactPhoneChrome ? styles.logoImageCompact : styles.logoImage}
+                resizeMode="contain"
+              />
+              <Text
+                style={[styles.logoText, compactPhoneChrome && styles.logoTextCompact]}
+                numberOfLines={1}
+              >
+                iAssess
+              </Text>
             </View>
           ) : (
             <Image source={IASSESS_LOGO} style={styles.logoImageCollapsed} resizeMode="cover" />
@@ -239,16 +329,37 @@ function MainLayout() {
 
         <View style={[styles.userProfileSection, isCollapsed && !isSmallScreen && styles.userProfileSectionCollapsed]}>
           <View style={[styles.userProfileTopRow, isCollapsed && !isSmallScreen && styles.userProfileTopRowCollapsed]}>
-            <View style={[styles.avatarPlaceholder, { backgroundColor: colors.activeBg }]}>
-              <Text style={styles.avatarText}>DA</Text>
+            <View
+              style={[
+                styles.avatarPlaceholder,
+                { backgroundColor: colors.activeBg, overflow: 'hidden' },
+              ]}
+            >
+              {sessionUser?.has_profile_picture &&
+              sessionUser.profile_picture_url &&
+              sessionToken ? (
+                sidebarAvatarUri ? (
+                  <Image
+                    source={{ uri: sidebarAvatarUri }}
+                    style={styles.sidebarAvatarImage}
+                    resizeMode="cover"
+                  />
+                ) : sidebarAvatarLoading ? (
+                  <ActivityIndicator size="small" color="#ffffff" />
+                ) : (
+                  <Text style={styles.avatarText}>{sidebarInitials}</Text>
+                )
+              ) : (
+                <Text style={styles.avatarText}>{sidebarInitials}</Text>
+              )}
             </View>
             {(!isCollapsed || isSmallScreen) && (
               <View style={styles.userInfo}>
                 <Text style={styles.userName} numberOfLines={1}>
-                  {MOCK_LOGIN_EMAIL.split('@')[0]}
+                  {sidebarDisplayName}
                 </Text>
                 <Text style={[styles.userEmail, { color: colors.sidebarText }]} numberOfLines={1}>
-                  {MOCK_LOGIN_EMAIL}
+                  {sidebarDisplayEmail}
                 </Text>
               </View>
             )}
@@ -388,9 +499,16 @@ function MainLayout() {
         animationType="fade"
         onRequestClose={() => setLogoutModalVisible(false)}
       >
-        <ScreenSafeArea
-          style={styles.logoutModalOverlay}
-          edges={['top', 'right', 'bottom', 'left']}
+        <View
+          style={[
+            styles.logoutModalOverlay,
+            {
+              paddingTop: safeInsets.top,
+              paddingBottom: safeInsets.bottom,
+              paddingLeft: Math.max(24, safeInsets.left),
+              paddingRight: Math.max(24, safeInsets.right),
+            },
+          ]}
         >
           <View style={[styles.logoutModalCard, { backgroundColor: colors.cardBg, borderColor: colors.border }]}>
             <Text style={[styles.logoutModalTitle, { color: colors.text }]}>Confirm Logout</Text>
@@ -415,7 +533,7 @@ function MainLayout() {
               </TouchableOpacity>
             </View>
           </View>
-        </ScreenSafeArea>
+        </View>
       </Modal>
     </ScreenSafeArea>
   );
@@ -448,14 +566,19 @@ const styles = StyleSheet.create({
     shadowRadius: 5,
   },
   sidebarHeader: {
-    padding: 20,
-    height: 70,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    minHeight: 112,
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
     alignItems: 'center',
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(255,255,255,0.1)',
     overflow: 'hidden',
+  },
+  sidebarHeaderCompact: {
+    minHeight: 88,
+    paddingVertical: 10,
   },
   sidebarHeaderCollapsed: {
     justifyContent: 'center',
@@ -466,21 +589,31 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: 'bold',
   },
+  logoTextCompact: {
+    fontSize: 19,
+  },
   logoWrap: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     minWidth: 0,
   },
   logoImage: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
+    width: 92,
+    height: 92,
+    borderRadius: 46,
     marginRight: 12,
   },
+  logoImageCompact: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    marginRight: 10,
+  },
   logoImageCollapsed: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: 96,
+    height: 96,
+    borderRadius: 48,
   },
   logoTextCollapsed: {
     color: '#fff',
@@ -577,6 +710,11 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  sidebarAvatarImage: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
   },
   avatarText: {
     color: '#fff',
@@ -722,6 +860,7 @@ const styles = StyleSheet.create({
   },
   contentArea: {
     flex: 1,
+    minHeight: 0,
     padding: 20,
   },
   screenContainer: {
@@ -741,7 +880,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.45)',
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 24,
   },
   logoutModalCard: {
     width: '100%',

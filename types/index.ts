@@ -4,6 +4,9 @@
  */
 
 // User Types
+/** Backend `users` row (no password) as JSON from login, register, and GET/PATCH /api/users/me */
+export type { PublicUserJson } from '@/database/models';
+
 export interface User {
   id: string;
   email: string;

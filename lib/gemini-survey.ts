@@ -2,7 +2,8 @@
  * Google Gemini vision API for survey table extraction (no local model disk).
  * Free tier: Google AI Studio API key — https://aistudio.google.com/apikey
  *
- * Env: GEMINI_API_KEY (required), GEMINI_MODEL optional (default gemini-1.5-flash)
+ * Env: GEMINI_API_KEY (required), GEMINI_MODEL optional (default gemini-2.5-flash).
+ * Note: gemini-1.5-flash is retired for v1beta generateContent — use 2.x / ListModels.
  */
 
 import { SURVEY_SYSTEM_PROMPT, SURVEY_USER_PROMPT } from '@/lib/ollama-interpret';
@@ -13,7 +14,8 @@ export function getGeminiApiKey(): string | undefined {
 }
 
 export function getGeminiModel(): string {
-  return (process.env.GEMINI_MODEL || 'gemini-1.5-flash').trim();
+  const raw = (process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
+  return raw.replace(/^models\//, '');
 }
 
 export function detectImageMimeType(buffer: Buffer): string {
@@ -35,49 +37,23 @@ export function detectImageMimeType(buffer: Buffer): string {
   return 'image/jpeg';
 }
 
-export async function geminiVisionSurveyJson(
-  imageBase64: string,
-  mimeType: string
-): Promise<string> {
-  const key = getGeminiApiKey();
-  if (!key) {
-    throw new Error('GEMINI_API_KEY is not set');
-  }
+/** If primary model 404s (retired name / region), try these in order. */
+const GEMINI_MODEL_FALLBACKS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-2.0-flash',
+  'gemini-flash-latest',
+];
 
-  const model = getGeminiModel();
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+const GEMINI_RETRYABLE_STATUS = new Set([503, 429]);
+/** Retries per model for overload / rate limit (Google often returns 503 "high demand"). */
+const GEMINI_MAX_ATTEMPTS_PER_MODEL = Number(process.env.GEMINI_MAX_RETRIES || '4') || 4;
 
-  const combinedPrompt = `${SURVEY_SYSTEM_PROMPT}\n\n${SURVEY_USER_PROMPT}`;
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [
-        {
-          parts: [
-            { text: combinedPrompt },
-            {
-              inline_data: {
-                mime_type: mimeType,
-                data: imageBase64,
-              },
-            },
-          ],
-        },
-      ],
-      generationConfig: {
-        temperature: 0.2,
-        responseMimeType: 'application/json',
-      },
-    }),
-  });
-
-  const raw = await res.text();
-  if (!res.ok) {
-    throw new Error(`Gemini HTTP ${res.status}: ${raw.slice(0, 800)}`);
-  }
-
+function parseGeminiSuccessBody(raw: string): string {
   let data: {
     promptFeedback?: { blockReason?: string };
     candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
@@ -102,4 +78,81 @@ export async function geminiVisionSurveyJson(
   }
 
   return text;
+}
+
+export async function geminiVisionSurveyJson(
+  imageBase64: string,
+  mimeType: string
+): Promise<string> {
+  const key = getGeminiApiKey();
+  if (!key) {
+    throw new Error('GEMINI_API_KEY is not set');
+  }
+
+  const preferred = getGeminiModel();
+  const modelsToTry = [preferred, ...GEMINI_MODEL_FALLBACKS.filter((m) => m !== preferred)];
+
+  const combinedPrompt = `${SURVEY_SYSTEM_PROMPT}\n\n${SURVEY_USER_PROMPT}`;
+  const body = JSON.stringify({
+    contents: [
+      {
+        parts: [
+          { text: combinedPrompt },
+          {
+            inline_data: {
+              mime_type: mimeType,
+              data: imageBase64,
+            },
+          },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.2,
+      responseMimeType: 'application/json',
+    },
+  });
+
+  let lastErrorSnippet = '';
+
+  modelLoop: for (const model of modelsToTry) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+
+    for (let attempt = 1; attempt <= GEMINI_MAX_ATTEMPTS_PER_MODEL; attempt++) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+
+      const raw = await res.text();
+
+      if (res.ok) {
+        return parseGeminiSuccessBody(raw);
+      }
+
+      lastErrorSnippet = raw.slice(0, 800);
+
+      if (res.status === 404) {
+        continue modelLoop;
+      }
+
+      if (GEMINI_RETRYABLE_STATUS.has(res.status) && attempt < GEMINI_MAX_ATTEMPTS_PER_MODEL) {
+        const base = 900 * 2 ** (attempt - 1);
+        const jitter = Math.floor(Math.random() * 400);
+        await sleep(base + jitter);
+        continue;
+      }
+
+      if (GEMINI_RETRYABLE_STATUS.has(res.status)) {
+        continue modelLoop;
+      }
+
+      throw new Error(`Gemini HTTP ${res.status}: ${lastErrorSnippet}`);
+    }
+  }
+
+  throw new Error(
+    `Gemini unavailable (overloaded or rate-limited after retries; tried ${modelsToTry.join(', ')}). ${lastErrorSnippet}`
+  );
 }

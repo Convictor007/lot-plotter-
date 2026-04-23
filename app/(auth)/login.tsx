@@ -21,7 +21,9 @@ import {
   MOCK_LOGIN_PASSWORD,
   isMockLoginValid,
 } from '@/constants/mockAuth';
-import { setSessionUserEmail } from '@/lib/authSession';
+import type { PublicUserJson } from '@/database/models';
+import { apiUrl } from '@/lib/api/api-url';
+import { removeItem, SESSION_AUTH_TOKEN_KEY, setAuthSession, setSessionUserEmail } from '@/lib/authSession';
 
 const COLORS = {
   primary: '#3b5998', // A formal blue matching the reference
@@ -74,15 +76,40 @@ export default function LoginScreen() {
     Keyboard.dismiss();
 
     try {
-      if (!isMockLoginValid(email, password)) {
-        Alert.alert('Login Failed', 'Invalid credentials');
+      const res = await fetch(apiUrl('/api/auth/login'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim(), password }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        code?: string;
+        message?: string;
+        token?: string;
+        user?: PublicUserJson;
+      };
+
+      if (res.ok && data.success && data.token && data.user?.email) {
+        await setAuthSession(data.user.email, data.token);
+        router.replace('/section/lot-plotter');
         return;
       }
-      await setSessionUserEmail(MOCK_LOGIN_EMAIL);
-      router.replace('/section/lot-plotter');
+
+      if (res.status === 503 && data.code === 'DB_NOT_CONFIGURED') {
+        if (!isMockLoginValid(email, password)) {
+          Alert.alert('Login Failed', 'Invalid credentials');
+          return;
+        }
+        await removeItem(SESSION_AUTH_TOKEN_KEY);
+        await setSessionUserEmail(MOCK_LOGIN_EMAIL);
+        router.replace('/section/lot-plotter');
+        return;
+      }
+
+      Alert.alert('Login Failed', data.message || 'Invalid credentials');
     } catch (e) {
       console.error('Login failed', e);
-      Alert.alert('Login Failed', 'Could not save session. Please try again.');
+      Alert.alert('Login Failed', 'Could not reach the server. Is Expo running and MySQL up?');
     } finally {
       setIsLoading(false);
     }
@@ -122,7 +149,7 @@ export default function LoginScreen() {
                 
                 <View style={styles.formHeader}>
                   <View style={styles.smallLogoPlaceholder}>
-                     <Image source={LOGO_IASSESS} style={styles.smallLogo} resizeMode="contain" />
+                    <Image source={LOGO_IASSESS} style={styles.smallLogo} resizeMode="contain" />
                   </View>
                   <Text style={styles.formHeaderText}>BALATAN MUNICIPAL{'\n'}ASSESSOR WEBSITE</Text>
                 </View>
@@ -355,19 +382,19 @@ const styles = StyleSheet.create({
     elevation: 10,
   },
   formHeader: {
-    flexDirection: 'row',
+    flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 30,
   },
   smallLogoPlaceholder: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 80,
+    height: 80,
+    borderRadius: 40,
     backgroundColor: 'rgba(59, 89, 152, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 12,
+    marginBottom: 12,
     overflow: 'hidden',
   },
   smallLogo: {
@@ -378,6 +405,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: 'bold',
     color: COLORS.text,
+    textAlign: 'center',
   },
   formTitle: {
     fontSize: 22,

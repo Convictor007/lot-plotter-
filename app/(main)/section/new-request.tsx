@@ -15,6 +15,8 @@ import * as DocumentPicker from 'expo-document-picker';
 
 import { useTheme } from '@/contexts/ThemeContext';
 import { useNewRequest } from '@/contexts/NewRequestContext';
+import { apiUrl } from '@/lib/api/api-url';
+import { getAuthToken } from '@/lib/authSession';
 
 // Constants based on the extracted documents
 const ASSESSMENT_TRANSACTIONS = [
@@ -162,13 +164,15 @@ export default function NewRequestScreen() {
     };
 
     try {
-      // API Request (Per rules: use API only, no direct DB)
-      const response = await fetch('/api/transactions', { 
-        method: 'POST', 
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(payload) 
+      const token = await getAuthToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+      const response = await fetch(apiUrl('/api/transactions'), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
       });
       
       const result = await response.json();
