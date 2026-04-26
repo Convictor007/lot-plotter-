@@ -32,6 +32,9 @@ module.exports = {
     extra: {
       ...(appJson.expo?.extra || {}),
       googleMapsApiKey,
+      eas: {
+        projectId: '1f8d11ba-337b-4ecf-8836-0dc14ba4c605',
+      },
     },
   },
 };

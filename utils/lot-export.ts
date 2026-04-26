@@ -14,7 +14,7 @@ import {
   computeStaticMapView,
 } from '@/utils/lot-pdf-map';
 
-const COMPASS_PNG = require('../assets/images/compass.png');
+const COMPASS_PNG = require('../assets/images/compass1.png');
 
 /** Load bundled compass art as a data URL so PDF/SVG `<image>` works offline in print. */
 async function getCompassPngDataUri(): Promise<string | null> {
