@@ -65,23 +65,73 @@ Priority:
 
 ## 4) Environment Variables
 
-Create `.env` in project root if you want AI interpretation.
+Create `.env` in project root.
 
-### Google Gemini (no local model download)
+Use this template (email-related variables intentionally excluded):
 
 ```env
-GEMINI_API_KEY=your_key_here
+# --------------------------------------------------------------------
+# Database / Auth
+# --------------------------------------------------------------------
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=
+MYSQL_DATABASE=iassess
+
+# Optional: single DSN alternative to MYSQL_* variables
+# DATABASE_URL=mysql://root:@127.0.0.1:3306/iassess
+
+JWT_SECRET=replace_with_a_long_random_secret
+
+# Optional defaults used when social auth creates a new user
+AUTH_DEFAULT_MUNICIPALITY=Balatan
+AUTH_DEFAULT_PROVINCE=Camarines Sur
+
+# --------------------------------------------------------------------
+# Map / GIS
+# --------------------------------------------------------------------
+MAPBOX_ACCESS_TOKEN=your_mapbox_token
+MAPBOX_STYLE_URL=mapbox://styles/mapbox/streets-v11
+GOOGLE_MAPS_API_KEY=your_google_maps_api_key
+
+# Client-exposed map config (Expo/Metro)
+EXPO_PUBLIC_MAPBOX_ACCESS_TOKEN=your_mapbox_token
+EXPO_PUBLIC_MAPBOX_STYLE_URL=mapbox://styles/mapbox/streets-v11
+EXPO_PUBLIC_GOOGLE_MAPS_API_KEY=your_google_maps_api_key
+
+# --------------------------------------------------------------------
+# Google / Facebook Auth
+# --------------------------------------------------------------------
+# Google OAuth client IDs
+GOOGLE_CLIENT_ID=your_google_web_client_id
+GOOGLE_WEB_CLIENT_ID=your_google_web_client_id
+GOOGLE_ANDROID_CLIENT_ID=your_google_android_client_id
+GOOGLE_IOS_CLIENT_ID=your_google_ios_client_id
+
+# Client-exposed Google IDs (used by Expo app)
+EXPO_PUBLIC_GOOGLE_CLIENT_ID=your_google_web_client_id
+EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID=your_google_web_client_id
+
+# Facebook OAuth app ID (client-exposed)
+EXPO_PUBLIC_FACEBOOK_APP_ID=your_facebook_app_id
+
+# --------------------------------------------------------------------
+# OCR / AI
+# --------------------------------------------------------------------
+EXPO_PUBLIC_OCR_SPACE_API_KEY=your_ocr_space_api_key
+GEMINI_API_KEY=your_gemini_api_key
 GEMINI_MODEL=gemini-2.5-flash
-```
 
-### Ollama (local model)
-
-```env
+# Optional local-model fallback
 OLLAMA_HOST=http://127.0.0.1:11434
 OLLAMA_MODEL=llava
 ```
 
-If both are set, the project prefers Gemini for `/api/ocr-interpret`.
+Notes:
+- If both Gemini and Ollama are configured, `/api/ocr-interpret` prefers Gemini.
+- `EXPO_PUBLIC_*` values are bundled into the client app; keep secrets out of those keys.
+- Keep `.env` local and never commit it.
 
 ---
 
