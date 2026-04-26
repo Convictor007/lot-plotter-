@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef, createElement } from 'react';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   View,
@@ -65,7 +65,7 @@ function profileFromApiUser(u: PublicUserJson): typeof MOCK_USER {
     email: u.email,
     phone_number: u.phone_number ?? '',
     gender: u.gender === 'Male' || u.gender === 'Female' ? u.gender : '',
-    age: u.age != null ? String(u.age) : ageFromIso(iso),
+    age: /^\d{4}-\d{2}-\d{2}$/.test(iso) ? ageFromIso(iso) : '',
     date_of_birth_iso: /^\d{4}-\d{2}-\d{2}$/.test(iso) ? iso : '',
     street_address: u.street_address ?? '',
     region: u.region ?? '',
@@ -77,7 +77,8 @@ function profileFromApiUser(u: PublicUserJson): typeof MOCK_USER {
     verification_status:
       u.verification_status === 'verified' ||
       u.verification_status === 'pending' ||
-      u.verification_status === 'unverified'
+      u.verification_status === 'unverified' ||
+      u.verification_status === 'rejected'
         ? u.verification_status
         : 'unverified',
     has_id_document: u.has_id_document ?? false,
@@ -101,7 +102,7 @@ export default function ProfileScreen() {
   const stackFields = width < 400;
   const iconMd = isCompact ? 18 : 20;
   const iconSm = isCompact ? 16 : 18;
-  const { colors } = useTheme();
+  const { colors, isDarkMode } = useTheme();
   const safeInsets = useSafeAreaInsets();
   const modalBackdropSafe = useMemo(
     () => ({
@@ -117,6 +118,8 @@ export default function ProfileScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [userData, setUserData] = useState(MOCK_USER);
+  /** Snapshot when entering edit mode; restored on Cancel. */
+  const editSnapshotRef = useRef<typeof MOCK_USER | null>(null);
 
   const [passwordModalVisible, setPasswordModalVisible] = useState(false);
   const [pwdCurrent, setPwdCurrent] = useState('');
@@ -131,7 +134,8 @@ export default function ProfileScreen() {
   const [idUploading, setIdUploading] = useState(false);
 
   const [genderModalVisible, setGenderModalVisible] = useState(false);
-  const [dobIosModalVisible, setDobIosModalVisible] = useState(false);
+  /** iOS + web: modal calendar (Android uses inline system picker). */
+  const [dobCalendarModalVisible, setDobCalendarModalVisible] = useState(false);
   const [dobAndroidOpen, setDobAndroidOpen] = useState(false);
   const [mapModalVisible, setMapModalVisible] = useState(false);
   const [geocodeLoading, setGeocodeLoading] = useState(false);
@@ -139,8 +143,9 @@ export default function ProfileScreen() {
   const [lastMapPin, setLastMapPin] = useState<{ lat: number; lng: number } | null>(null);
 
   const [authToken, setAuthToken] = useState<string | null>(null);
-  const [avatarModalVisible, setAvatarModalVisible] = useState(false);
   const [avatarUploading, setAvatarUploading] = useState(false);
+  /** Set when /api/users/me fails so we don’t silently look “synced” with MySQL. */
+  const [profileLoadNotice, setProfileLoadNotice] = useState<string | null>(null);
 
   const { uri: resolvedAvatarUri, loading: avatarImageLoading } = useAuthenticatedImageDataUri(
     userData.profile_picture_url,
@@ -156,6 +161,9 @@ export default function ProfileScreen() {
     return new Date(y, m - 1, d);
   }, [userData.date_of_birth_iso]);
 
+  /** HTML `input[type=date]` max (today) for the web date picker. */
+  const dobCalendarMaxIso = new Date().toISOString().slice(0, 10);
+
   const onNativeDobChange = (_: unknown, date?: Date) => {
     if (Platform.OS === 'android') setDobAndroidOpen(false);
     if (!date) return;
@@ -167,10 +175,33 @@ export default function ProfileScreen() {
     }));
   };
 
+  const openDobPicker = () => {
+    if (Platform.OS === 'android') setDobAndroidOpen(true);
+    else setDobCalendarModalVisible(true);
+  };
+
+  const onWebHtmlDateChange = (isoDay: string) => {
+    if (!isoDay || !/^\d{4}-\d{2}-\d{2}$/.test(isoDay)) return;
+    const d = new Date(`${isoDay}T12:00:00`);
+    if (Number.isNaN(d.getTime())) return;
+    onNativeDobChange(null, d);
+  };
+
   const openAddressMap = useCallback(() => {
+    if (!isEditing) {
+      editSnapshotRef.current = { ...userData };
+    }
     setIsEditing(true);
     setMapModalVisible(true);
-  }, []);
+  }, [isEditing, userData]);
+
+  const cancelEdit = () => {
+    if (editSnapshotRef.current) {
+      setUserData(editSnapshotRef.current);
+    }
+    editSnapshotRef.current = null;
+    setIsEditing(false);
+  };
 
   const applyPinAddress = useCallback(async (lat: number, lng: number, cached?: GeocodedAddressPreview | null) => {
     setIsEditing(true);
@@ -278,6 +309,7 @@ export default function ProfileScreen() {
 
   useEffect(() => {
     const fetchUser = async () => {
+      setProfileLoadNotice(null);
       try {
         const token = await getAuthToken();
         setAuthToken(token);
@@ -285,10 +317,33 @@ export default function ProfileScreen() {
           const res = await fetch(apiUrl('/api/users/me'), {
             headers: { Authorization: `Bearer ${token}` },
           });
-          const json = (await res.json()) as { success?: boolean; user?: PublicUserJson };
+          let json: { success?: boolean; user?: PublicUserJson; code?: string; message?: string } = {};
+          try {
+            json = (await res.json()) as typeof json;
+          } catch {
+            json = { success: false, message: 'Server returned a non-JSON response.' };
+          }
+
           if (res.ok && json.success && json.user) {
             setUserData(profileFromApiUser(json.user));
             return;
+          }
+
+          if (res.status === 503 && json.code === 'DB_NOT_CONFIGURED') {
+            setProfileLoadNotice(
+              'Database is not configured on the server (set MYSQL_DATABASE or DATABASE_URL in .env and restart). Showing demo profile fields only.'
+            );
+          } else if (res.status === 401) {
+            setProfileLoadNotice('Could not verify your session. Sign out and sign in again to load your account from the database.');
+          } else if (res.status === 404) {
+            setProfileLoadNotice(json.message || 'User record not found in the database.');
+          } else {
+            setProfileLoadNotice(
+              json.message || `Profile API error (HTTP ${res.status}). Fields below may not match your database row.`
+            );
+          }
+          if (__DEV__) {
+            console.warn('[Profile] /api/users/me failed', res.status, json.code ?? json.message);
           }
         }
 
@@ -302,6 +357,9 @@ export default function ProfileScreen() {
         }
       } catch (e) {
         console.error('Failed to load user data', e);
+        setProfileLoadNotice(
+          'Network error loading profile. On a phone, set EXPO_PUBLIC_API_URL to your computer IP:8081 if the API is not reachable.'
+        );
       } finally {
         setIsLoading(false);
       }
@@ -309,8 +367,6 @@ export default function ProfileScreen() {
 
     fetchUser();
   }, []);
-
-  const closeAvatarModal = () => setAvatarModalVisible(false);
 
   const uploadProfilePhotoFromPicker = async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -357,7 +413,6 @@ export default function ProfileScreen() {
         throw new Error(json.message || 'Upload failed.');
       }
       setUserData(profileFromApiUser(json.user));
-      setAvatarModalVisible(false);
       Alert.alert('Updated', 'Your profile picture was saved.');
     } catch (e) {
       Alert.alert('Error', e instanceof Error ? e.message : 'Upload failed.');
@@ -383,7 +438,6 @@ export default function ProfileScreen() {
         throw new Error(json.message || 'Could not remove picture.');
       }
       setUserData(profileFromApiUser(json.user));
-      setAvatarModalVisible(false);
     } catch (e) {
       Alert.alert('Error', e instanceof Error ? e.message : 'Remove failed.');
     } finally {
@@ -416,16 +470,13 @@ export default function ProfileScreen() {
       return;
     }
 
-    let ageNum: number | null;
-    if (!userData.age.trim()) {
-      ageNum = null;
-    } else {
-      const n = parseInt(userData.age.replace(/\D/g, ''), 10);
-      if (!Number.isFinite(n) || n < 0 || n > 150) {
-        Alert.alert('Invalid age', 'Enter a valid age (0–150) or leave the field blank.');
-        return;
+    let ageNum: number | null = null;
+    if (date_of_birth) {
+      const computed = ageFromIso(date_of_birth);
+      if (computed !== '') {
+        const n = parseInt(computed, 10);
+        if (Number.isFinite(n) && n >= 0 && n <= 150) ageNum = n;
       }
-      ageNum = n;
     }
 
     const mun = userData.municipality.trim();
@@ -470,7 +521,9 @@ export default function ProfileScreen() {
       }
 
       setUserData(profileFromApiUser(json.user!));
+      editSnapshotRef.current = null;
       setIsEditing(false);
+      setProfileLoadNotice(null);
       Alert.alert('Saved', 'Your profile was updated.');
     } catch (e) {
       console.error('Profile save failed', e);
@@ -498,22 +551,26 @@ export default function ProfileScreen() {
   }
 
   const renderBadge = () => {
-    let bgColor = '#e74c3c'; // danger
-    let icon = 'close-circle';
+    let bgColor = colors.danger;
+    let icon = 'close-circle' as const;
     let text = 'UNVERIFIED';
 
     if (userData.verification_status === 'verified') {
-      bgColor = '#2ecc71'; // success
+      bgColor = colors.success;
       icon = 'checkmark-circle';
       text = 'VERIFIED';
     } else if (userData.verification_status === 'pending') {
-      bgColor = '#f1c40f'; // warning
+      bgColor = colors.warning;
       icon = 'time';
       text = 'PENDING ID';
+    } else if (userData.verification_status === 'rejected') {
+      bgColor = colors.danger;
+      icon = 'close-circle';
+      text = 'REJECTED';
     }
 
     return (
-      <View style={[styles.badgeContainer, isCompact && styles.badgeContainerCompact]}>
+      <View style={[styles.badgeContainer, isCompact && styles.badgeContainerCompact, { backgroundColor: bgColor }]}>
         <Ionicons name={icon as any} size={isCompact ? 12 : 14} color="#fff" />
         <Text style={[styles.badgeText, isCompact && styles.badgeTextCompact]}>{text}</Text>
       </View>
@@ -545,13 +602,26 @@ export default function ProfileScreen() {
     );
   };
 
+  const renderAgeField = () => {
+    const iso = userData.date_of_birth_iso.trim();
+    const computed = /^\d{4}-\d{2}-\d{2}$/.test(iso) ? ageFromIso(iso) : '';
+    const displayText = computed !== '' ? computed : 'Not provided';
+    return (
+      <View style={[styles.fieldContainer, stackFields && styles.fieldContainerStack]}>
+        <Text style={[styles.fieldLabel, isCompact && styles.fieldLabelCompact, { color: colors.textMuted }]}>Age</Text>
+        <Text style={[styles.fieldValue, isCompact && styles.fieldValueCompact, { color: colors.text }]}>{displayText}</Text>
+      </View>
+    );
+  };
+
   const renderGenderField = () => (
-    <View style={[styles.fieldContainer, stackFields && styles.fieldContainerStack]}>
+    <View style={[styles.fieldContainer, styles.fieldContainerFull, stackFields && styles.fieldContainerStack]}>
       <Text style={[styles.fieldLabel, isCompact && styles.fieldLabelCompact, { color: colors.textMuted }]}>Gender</Text>
       {isEditing ? (
         <TouchableOpacity
           style={[
             styles.selectRow,
+            styles.selectRowFullWidth,
             isCompact && styles.selectRowCompact,
             { backgroundColor: colors.contentBg, borderColor: colors.border },
           ]}
@@ -582,56 +652,52 @@ export default function ProfileScreen() {
       ? formatDobFromApi(userData.date_of_birth_iso)
       : '';
     return (
-      <View style={[styles.fieldContainer, stackFields && styles.fieldContainerStack]}>
+      <View style={[styles.fieldContainer, styles.fieldContainerFull, stackFields && styles.fieldContainerStack]}>
         <Text style={[styles.fieldLabel, isCompact && styles.fieldLabelCompact, { color: colors.textMuted }]}>
           Date of Birth
         </Text>
         {isEditing ? (
           <>
-            {Platform.OS === 'web' ? (
+            <View style={styles.dobRow}>
               <TextInput
                 style={[
                   styles.input,
+                  styles.dobTextInput,
                   isCompact && styles.inputCompact,
                   { backgroundColor: colors.contentBg, color: colors.text, borderColor: colors.border },
                 ]}
                 value={userData.date_of_birth_iso}
                 onChangeText={(text) => {
-                  const t = text.trim().slice(0, 10);
+                  const t = text.replace(/[^\d-]/g, '').slice(0, 10);
                   setUserData((prev) => ({
                     ...prev,
                     date_of_birth_iso: t,
-                    age: /^\d{4}-\d{2}-\d{2}$/.test(t) ? ageFromIso(t) : prev.age,
+                    age: /^\d{4}-\d{2}-\d{2}$/.test(t) ? ageFromIso(t) : '',
                   }));
                 }}
                 placeholder="YYYY-MM-DD"
                 placeholderTextColor={colors.textMuted}
+                autoCapitalize="none"
+                autoCorrect={false}
               />
-            ) : (
               <TouchableOpacity
                 style={[
-                  styles.selectRow,
-                  isCompact && styles.selectRowCompact,
-                  { backgroundColor: colors.contentBg, borderColor: colors.border },
+                  styles.dobCalendarBtn,
+                  isCompact && styles.dobCalendarBtnCompact,
+                  { borderColor: colors.border, backgroundColor: colors.contentBg },
                 ]}
-                onPress={() => {
-                  if (Platform.OS === 'android') setDobAndroidOpen(true);
-                  else setDobIosModalVisible(true);
-                }}
+                onPress={openDobPicker}
                 activeOpacity={0.75}
+                accessibilityLabel="Open date calendar"
               >
-                <Text
-                  style={[
-                    styles.selectRowText,
-                    isCompact && styles.selectRowTextCompact,
-                    { color: display ? colors.text : colors.textMuted },
-                  ]}
-                >
-                  {display || 'Tap to choose date'}
-                </Text>
                 <Ionicons name="calendar-outline" size={iconMd} color={colors.primary} />
               </TouchableOpacity>
-            )}
+            </View>
+            {display ? (
+              <Text style={[styles.dobHint, { color: colors.textMuted }]} numberOfLines={1}>
+                {display}
+              </Text>
+            ) : null}
             {Platform.OS === 'android' && dobAndroidOpen ? (
               <DateTimePicker
                 value={dobPickerDate}
@@ -660,96 +726,216 @@ export default function ProfileScreen() {
     .filter(Boolean)
     .join('\n');
 
-  const renderOverviewCard = () => (
-    <View
-      style={[
-        styles.overviewCard,
-        isCompact && styles.overviewCardCompact,
-        { backgroundColor: colors.cardBg, borderColor: colors.border },
-      ]}
-    >
-      <View style={[styles.overviewGrid, isCompact && styles.overviewGridCompact]}>
-        <View style={[styles.overviewRow, isCompact && styles.overviewRowCompact]}>
-          <View style={[styles.overviewCol, styles.overviewColLeft]}>
-            <Pressable
-              onPress={() => setAvatarModalVisible(true)}
-              disabled={avatarUploading}
-              style={({ pressed }) => [{ opacity: pressed ? 0.85 : 1 }]}
-              accessibilityLabel="Change profile picture"
-            >
-              <View
-                style={[
-                  styles.avatarContainer,
-                  isCompact && styles.avatarContainerCompact,
-                  { backgroundColor: colors.primary, overflow: 'hidden' },
-                ]}
-              >
-                {userData.has_profile_picture &&
-                userData.profile_picture_url &&
-                authToken ? (
-                  resolvedAvatarUri ? (
-                    <Image
-                      source={{ uri: resolvedAvatarUri }}
-                      style={[styles.avatarImage, isCompact && styles.avatarImageCompact]}
-                      resizeMode="cover"
-                    />
-                  ) : avatarImageLoading ? (
-                    <ActivityIndicator color="#fff" />
-                  ) : (
-                    <Text style={[styles.avatarText, isCompact && styles.avatarTextCompact]}>
-                      {userData.first_name.charAt(0)}
-                      {userData.last_name.charAt(0)}
-                    </Text>
-                  )
-                ) : (
-                  <Text style={[styles.avatarText, isCompact && styles.avatarTextCompact]}>
-                    {userData.first_name.charAt(0)}
-                    {userData.last_name.charAt(0)}
-                  </Text>
-                )}
-              </View>
-            </Pressable>
-          </View>
-          <View style={[styles.overviewCol, styles.overviewColRight]}>
-            <Text style={[styles.userName, isCompact && styles.userNameCompact, { color: colors.text }]}>
-              {userData.first_name} {userData.last_name}
-            </Text>
-            <Text style={[styles.userRole, isCompact && styles.userRoleCompact, { color: colors.textMuted }]}>
-              {userData.role} Account
-            </Text>
-          </View>
-        </View>
-        <View style={[styles.overviewRow, isCompact && styles.overviewRowCompact]}>
-          <View style={[styles.overviewCol, styles.overviewColLeft]}>
-            <Text
-              style={[styles.overviewEmail, isCompact && styles.overviewEmailCompact, { color: colors.textMuted }]}
-              numberOfLines={2}
-            >
-              {userData.email}
-            </Text>
-          </View>
-          <View style={[styles.overviewCol, styles.overviewColRight, styles.overviewBadgeCell]}>{renderBadge()}</View>
-        </View>
-      </View>
-
-      <View style={[styles.overviewBottom, isCompact && styles.overviewBottomCompact, { borderTopColor: colors.border }]}>
-        <TouchableOpacity
-          style={[styles.editBtn, isCompact && styles.editBtnCompact, { backgroundColor: isEditing ? colors.success : colors.primary }]}
-          onPress={isEditing ? handleSave : () => setIsEditing(true)}
-          disabled={isSaving}
+  const renderOverviewCard = () => {
+    const avatarBlock = (
+      <View style={[styles.overviewAvatarBlock, isEditing && styles.overviewAvatarBlockEditing]}>
+        <View
+          style={[
+            styles.avatarContainer,
+            isCompact && styles.avatarContainerCompact,
+            { backgroundColor: colors.primary, overflow: 'hidden' },
+          ]}
+          accessibilityRole="image"
+          accessibilityLabel="Profile picture"
         >
-          {isSaving ? (
-            <ActivityIndicator size="small" color="#fff" />
+          {userData.has_profile_picture && userData.profile_picture_url && authToken ? (
+            resolvedAvatarUri ? (
+              <Image
+                source={{ uri: resolvedAvatarUri }}
+                style={[styles.avatarImage, isCompact && styles.avatarImageCompact]}
+                resizeMode="cover"
+              />
+            ) : avatarImageLoading ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={[styles.avatarText, isCompact && styles.avatarTextCompact]}>
+                {userData.first_name.charAt(0)}
+                {userData.last_name.charAt(0)}
+              </Text>
+            )
           ) : (
-            <Ionicons name={isEditing ? 'save-outline' : 'create-outline'} size={isCompact ? 16 : 18} color="#fff" />
+            <Text style={[styles.avatarText, isCompact && styles.avatarTextCompact]}>
+              {userData.first_name.charAt(0)}
+              {userData.last_name.charAt(0)}
+            </Text>
           )}
-          <Text style={[styles.editBtnText, isCompact && styles.editBtnTextCompact]}>
-            {isEditing ? (isSaving ? 'Saving…' : 'Save Changes') : 'Edit Profile'}
-          </Text>
-        </TouchableOpacity>
+        </View>
+        {isEditing ? (
+          <View style={[styles.avatarEditBlock, isCompact && styles.avatarEditBlockCompact]}>
+            {isCompact ? (
+              <View style={styles.avatarPhotoActionsRow}>
+                <TouchableOpacity
+                  style={[styles.avatarActionIconOnlySmall, styles.avatarActionIconOnlyMobile, { backgroundColor: colors.primary }]}
+                  onPress={() => void uploadProfilePhotoFromPicker()}
+                  disabled={avatarUploading}
+                  activeOpacity={0.85}
+                  accessibilityRole="button"
+                  accessibilityLabel={userData.has_profile_picture ? 'Replace profile photo' : 'Upload profile photo'}
+                >
+                  {avatarUploading ? (
+                    <ActivityIndicator color="#fff" size="small" />
+                  ) : (
+                    <Ionicons name="cloud-upload-outline" size={16} color="#fff" />
+                  )}
+                </TouchableOpacity>
+                {userData.has_profile_picture ? (
+                  <TouchableOpacity
+                    style={[
+                      styles.avatarActionIconOnlySmall,
+                      styles.avatarActionIconOnlyMobile,
+                      styles.avatarActionIconOnlyDanger,
+                      { borderColor: colors.danger },
+                    ]}
+                    onPress={() => void removeProfilePhoto()}
+                    disabled={avatarUploading}
+                    activeOpacity={0.85}
+                    accessibilityRole="button"
+                    accessibilityLabel="Remove profile photo"
+                  >
+                    <Ionicons name="trash-outline" size={15} color={colors.danger} />
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+            ) : (
+              <>
+                <TouchableOpacity
+                  style={[styles.avatarActionTextOnlySmall, { borderColor: colors.border, backgroundColor: colors.contentBg }]}
+                  onPress={() => void uploadProfilePhotoFromPicker()}
+                  disabled={avatarUploading}
+                  activeOpacity={0.85}
+                >
+                  {avatarUploading ? (
+                    <ActivityIndicator color={colors.primary} size="small" />
+                  ) : (
+                    <Text style={[styles.avatarActionTextOnlyLabelSmall, { color: colors.primary }]}>
+                      {userData.has_profile_picture ? 'Replace photo' : 'Upload photo'}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+                {userData.has_profile_picture ? (
+                  <TouchableOpacity
+                    style={[styles.avatarActionTextOnlySmall, styles.avatarActionTextOnlyMuted, { borderColor: colors.border }]}
+                    onPress={() => void removeProfilePhoto()}
+                    disabled={avatarUploading}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={[styles.avatarActionTextOnlyLabelSmall, { color: colors.danger }]}>Remove photo</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </>
+            )}
+          </View>
+        ) : null}
       </View>
-    </View>
-  );
+    );
+
+    return (
+      <View
+        style={[
+          styles.overviewCard,
+          isCompact && styles.overviewCardCompact,
+          { backgroundColor: colors.cardBg, borderColor: colors.border },
+        ]}
+      >
+        <View style={[styles.overviewGrid, isCompact && styles.overviewGridCompact]}>
+          <View
+            style={[
+              styles.overviewHeadRow,
+              isCompact && styles.overviewHeadRowCompact,
+              isEditing && styles.overviewRowEditing,
+            ]}
+          >
+            <View style={[styles.overviewAvatarCol, isCompact && styles.overviewAvatarColCompact]}>
+              {avatarBlock}
+              {isCompact ? (
+                <Text
+                  style={[styles.overviewEmail, styles.overviewEmailBelowAvatar, { color: colors.textMuted }]}
+                  numberOfLines={2}
+                >
+                  {userData.email}
+                </Text>
+              ) : null}
+            </View>
+            <View style={styles.overviewTextCol}>
+              <Text style={[styles.userName, isCompact && styles.userNameCompact, { color: colors.text }]}>
+                {userData.first_name} {userData.last_name}
+              </Text>
+              <Text style={[styles.userRole, isCompact && styles.userRoleCompact, { color: colors.textMuted }]}>
+                {userData.role} Account
+              </Text>
+              {!isCompact ? (
+                <View style={styles.overviewEmailSubRow}>
+                  <Text
+                    style={[
+                      styles.overviewEmail,
+                      { color: colors.textMuted, flex: 1, minWidth: 0 },
+                    ]}
+                    numberOfLines={2}
+                  >
+                    {userData.email}
+                  </Text>
+                  <View style={styles.overviewBadgeCell}>{renderBadge()}</View>
+                </View>
+              ) : null}
+            </View>
+          </View>
+          {isCompact ? (
+            <View style={styles.overviewBadgeRowMobile}>
+              <View style={styles.overviewBadgeCell}>{renderBadge()}</View>
+            </View>
+          ) : null}
+        </View>
+
+        <View style={[styles.overviewBottom, isCompact && styles.overviewBottomCompact, { borderTopColor: colors.border }]}>
+          {isEditing ? (
+            <View style={styles.overviewEditActionsRow}>
+              <TouchableOpacity
+                style={[
+                  styles.cancelEditBtn,
+                  isCompact && styles.cancelEditBtnCompact,
+                  { borderColor: colors.border, backgroundColor: colors.contentBg },
+                ]}
+                onPress={cancelEdit}
+                disabled={isSaving || avatarUploading}
+                activeOpacity={0.85}
+              >
+                <Text style={[styles.cancelEditBtnText, isCompact && styles.cancelEditBtnTextCompact, { color: colors.text }]}>
+                  Cancel
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.editBtn, isCompact && styles.editBtnCompact, { backgroundColor: colors.success }]}
+                onPress={handleSave}
+                disabled={isSaving || avatarUploading}
+                activeOpacity={0.85}
+              >
+                {isSaving ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Ionicons name="save-outline" size={isCompact ? 16 : 18} color="#fff" />
+                )}
+                <Text style={[styles.editBtnText, isCompact && styles.editBtnTextCompact]}>
+                  {isSaving ? 'Saving…' : 'Save Changes'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <TouchableOpacity
+              style={[styles.editBtn, isCompact && styles.editBtnCompact, { backgroundColor: colors.primary }]}
+              onPress={() => {
+                editSnapshotRef.current = { ...userData };
+                setIsEditing(true);
+              }}
+              disabled={isSaving}
+            >
+              <Ionicons name="create-outline" size={isCompact ? 16 : 18} color="#fff" />
+              <Text style={[styles.editBtnText, isCompact && styles.editBtnTextCompact]}>Edit Profile</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+    );
+  };
 
   const pickIdDocument = async () => {
     try {
@@ -812,7 +998,7 @@ export default function ProfileScreen() {
 
   const renderIdVerificationCard = () => {
     const status = userData.verification_status;
-    const canUpload = status === 'unverified' || status === 'pending';
+    const canUpload = status === 'unverified' || status === 'pending' || status === 'rejected';
 
     return (
       <View
@@ -844,7 +1030,7 @@ export default function ProfileScreen() {
                 { backgroundColor: colors.contentBg, borderColor: colors.border },
               ]}
             >
-              <Ionicons name="shield-checkmark" size={isCompact ? 20 : 22} color="#2ecc71" />
+              <Ionicons name="shield-checkmark" size={isCompact ? 20 : 22} color={colors.success} />
               <Text
                 style={[styles.idVerificationBannerText, isCompact && styles.idVerificationBannerTextCompact, { color: colors.text }]}
               >
@@ -854,10 +1040,38 @@ export default function ProfileScreen() {
           ) : null}
 
           {status === 'pending' ? (
-            <Text style={[styles.idVerificationHint, isCompact && styles.idVerificationHintCompact, { color: colors.textMuted }]}>
-              We are reviewing your ID. This usually takes 1–2 business days. You may upload a clearer copy below if
-              needed.
-            </Text>
+            <View
+              style={[
+                styles.idVerificationBanner,
+                isCompact && styles.idVerificationBannerCompact,
+                { backgroundColor: colors.contentBg, borderColor: colors.warning },
+              ]}
+            >
+              <Ionicons name="time-outline" size={isCompact ? 20 : 22} color={colors.warning} />
+              <Text
+                style={[styles.idVerificationBannerText, isCompact && styles.idVerificationBannerTextCompact, { color: colors.text }]}
+              >
+                Pending review — we are checking your ID. This usually takes 1–2 business days. You can upload a clearer
+                copy below if needed.
+              </Text>
+            </View>
+          ) : null}
+
+          {status === 'rejected' ? (
+            <View
+              style={[
+                styles.idVerificationBanner,
+                isCompact && styles.idVerificationBannerCompact,
+                { backgroundColor: colors.contentBg, borderColor: colors.danger },
+              ]}
+            >
+              <Ionicons name="close-circle-outline" size={isCompact ? 20 : 22} color={colors.danger} />
+              <Text
+                style={[styles.idVerificationBannerText, isCompact && styles.idVerificationBannerTextCompact, { color: colors.text }]}
+              >
+                Your ID was not approved. Please upload a new, clear photo or PDF of your valid government ID below.
+              </Text>
+            </View>
           ) : null}
 
           {status === 'unverified' ? (
@@ -902,7 +1116,7 @@ export default function ProfileScreen() {
                   <>
                     <Ionicons name="send-outline" size={iconSm} color="#fff" />
                     <Text style={[styles.idSubmitBtnText, isCompact && styles.idSubmitBtnTextCompact]}>
-                      {status === 'pending' ? 'Replace ID' : 'Submit for review'}
+                      {status === 'pending' || status === 'rejected' ? 'Replace ID' : 'Submit for review'}
                     </Text>
                   </>
                 )}
@@ -941,7 +1155,7 @@ export default function ProfileScreen() {
           {renderField('Last Name', userData.last_name, 'last_name')}
           {renderGenderField()}
           {renderDobField()}
-          {renderField('Age', userData.age, 'age')}
+          {renderAgeField()}
           {renderField('Role', userData.role, 'role', false)}
         </View>
       </View>
@@ -1001,6 +1215,7 @@ export default function ProfileScreen() {
               <TouchableOpacity
                 style={[
                   styles.selectRow,
+                  styles.selectRowFullWidth,
                   isCompact && styles.selectRowCompact,
                   { backgroundColor: colors.contentBg, borderColor: colors.border },
                 ]}
@@ -1111,6 +1326,23 @@ export default function ProfileScreen() {
       ]}
     >
       <View style={[styles.mainWrapper, isWeb && styles.mainWrapperWeb, isWideLayout && styles.mainWrapperWide]}>
+        {profileLoadNotice ? (
+          <View
+            style={[
+              styles.profileLoadNotice,
+              isCompact && styles.profileLoadNoticeCompact,
+              {
+                backgroundColor: isDarkMode ? 'rgba(241, 196, 15, 0.12)' : 'rgba(241, 196, 15, 0.18)',
+                borderColor: colors.warning,
+              },
+            ]}
+          >
+            <Ionicons name="warning-outline" size={isCompact ? 20 : 22} color={colors.warning} />
+            <Text style={[styles.profileLoadNoticeText, isCompact && styles.profileLoadNoticeTextCompact, { color: colors.text }]}>
+              {profileLoadNotice}
+            </Text>
+          </View>
+        ) : null}
         {isWideLayout ? (
           <View style={styles.wideColumns}>
             <View style={styles.wideColumnLeft}>
@@ -1150,55 +1382,6 @@ export default function ProfileScreen() {
     />
 
     <Modal
-      visible={avatarModalVisible}
-      animationType="fade"
-      transparent
-      onRequestClose={closeAvatarModal}
-    >
-      <Pressable style={[styles.modalBackdrop, modalBackdropSafe]} onPress={closeAvatarModal}>
-        <Pressable
-          style={[styles.modalCard, isCompact && styles.modalCardCompact, { backgroundColor: colors.cardBg, borderColor: colors.border }]}
-          onPress={(e) => e.stopPropagation()}
-        >
-          <Text style={[styles.modalTitle, isCompact && styles.modalTitleCompact, { color: colors.text, marginBottom: 12 }]}>
-            Profile photo
-          </Text>
-          <Text style={[{ fontSize: 14, color: colors.textMuted, marginBottom: 16 }]}>
-            Tap your initials to open this anytime. Photos are stored with your account.
-          </Text>
-          <TouchableOpacity
-            style={[styles.avatarModalPrimaryBtn, { backgroundColor: colors.primary }]}
-            onPress={() => void uploadProfilePhotoFromPicker()}
-            disabled={avatarUploading}
-            activeOpacity={0.85}
-          >
-            {avatarUploading ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <>
-                <Ionicons name="images-outline" size={20} color="#fff" />
-                <Text style={styles.avatarModalPrimaryBtnText}>Choose from library</Text>
-              </>
-            )}
-          </TouchableOpacity>
-          {userData.has_profile_picture ? (
-            <TouchableOpacity
-              style={[styles.avatarModalDangerBtn, { borderColor: colors.danger }]}
-              onPress={() => void removeProfilePhoto()}
-              disabled={avatarUploading}
-              activeOpacity={0.85}
-            >
-              <Text style={[styles.avatarModalDangerBtnText, { color: colors.danger }]}>Remove photo</Text>
-            </TouchableOpacity>
-          ) : null}
-          <TouchableOpacity style={styles.avatarModalCancelBtn} onPress={closeAvatarModal} disabled={avatarUploading}>
-            <Text style={{ color: colors.textMuted, fontSize: 16 }}>Cancel</Text>
-          </TouchableOpacity>
-        </Pressable>
-      </Pressable>
-    </Modal>
-
-    <Modal
       visible={genderModalVisible}
       animationType="fade"
       transparent
@@ -1229,31 +1412,57 @@ export default function ProfileScreen() {
     </Modal>
 
     <Modal
-      visible={dobIosModalVisible}
+      visible={dobCalendarModalVisible}
       animationType="slide"
       transparent
-      onRequestClose={() => setDobIosModalVisible(false)}
+      onRequestClose={() => setDobCalendarModalVisible(false)}
     >
-      <Pressable style={[styles.modalBackdrop, modalBackdropSafe]} onPress={() => setDobIosModalVisible(false)}>
+      <Pressable style={[styles.modalBackdrop, modalBackdropSafe]} onPress={() => setDobCalendarModalVisible(false)}>
         <Pressable
           style={[styles.modalCard, isCompact && styles.modalCardCompact, { backgroundColor: colors.cardBg, borderColor: colors.border }]}
           onPress={(e) => e.stopPropagation()}
         >
-          <Text style={[styles.modalTitle, isCompact && styles.modalTitleCompact, { color: colors.text }]}>Date of birth</Text>
-          <DateTimePicker
-            value={dobPickerDate}
-            mode="date"
-            display="spinner"
-            onChange={onNativeDobChange}
-            maximumDate={new Date()}
-          />
+          <Text style={[styles.modalTitle, isCompact && styles.modalTitleCompact, { color: colors.text }]}>
+            Date of birth
+          </Text>
+          <Text style={[styles.modalHint, isCompact && styles.modalHintCompact, { color: colors.textMuted, marginBottom: 12 }]}>
+            Pick a date with the control below, or type YYYY-MM-DD in the field on your profile.
+          </Text>
+          {Platform.OS === 'web' ? (
+            <View style={[styles.webDateInputWrap, { borderColor: colors.border, backgroundColor: colors.contentBg }]}>
+              {createElement('input', {
+                type: 'date',
+                value: /^\d{4}-\d{2}-\d{2}$/.test(userData.date_of_birth_iso) ? userData.date_of_birth_iso : '',
+                max: dobCalendarMaxIso,
+                onChange: (e: { target: HTMLInputElement }) => onWebHtmlDateChange(e.target.value),
+                style: {
+                  width: '100%',
+                  fontSize: isCompact ? 15 : 17,
+                  padding: '12px 14px',
+                  border: 'none',
+                  borderRadius: 8,
+                  boxSizing: 'border-box',
+                  backgroundColor: 'transparent',
+                  color: colors.text as string,
+                },
+              })}
+            </View>
+          ) : (
+            <DateTimePicker
+              value={dobPickerDate}
+              mode="date"
+              display="spinner"
+              onChange={onNativeDobChange}
+              maximumDate={new Date()}
+            />
+          )}
           <TouchableOpacity
             style={[
               styles.modalBtnPrimary,
               isCompact && styles.modalBtnPrimaryCompact,
               { backgroundColor: colors.primary, marginTop: 12 },
             ]}
-            onPress={() => setDobIosModalVisible(false)}
+            onPress={() => setDobCalendarModalVisible(false)}
           >
             <Text style={[styles.modalBtnPrimaryText, isCompact && styles.modalBtnPrimaryTextCompact]}>Done</Text>
           </TouchableOpacity>
@@ -1413,6 +1622,30 @@ const styles = StyleSheet.create({
     width: '100%',
     alignSelf: 'center',
   },
+  profileLoadNotice: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    padding: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginBottom: 16,
+    width: '100%',
+  },
+  profileLoadNoticeCompact: {
+    padding: 12,
+    marginBottom: 12,
+    gap: 8,
+  },
+  profileLoadNoticeText: {
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  profileLoadNoticeTextCompact: {
+    fontSize: 12,
+    lineHeight: 17,
+  },
   wideColumns: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -1463,6 +1696,119 @@ const styles = StyleSheet.create({
   overviewRowCompact: {
     gap: 10,
   },
+  overviewRowEditing: {
+    alignItems: 'flex-start',
+  },
+  /** Avatar + name/role/email+badge: avatar vertically centered beside text block */
+  overviewHeadRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 16,
+    width: '100%',
+  },
+  overviewHeadRowCompact: {
+    gap: 10,
+  },
+  overviewAvatarCol: {
+    justifyContent: 'center',
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    flexShrink: 0,
+  },
+  overviewAvatarColCompact: {
+    alignItems: 'center',
+  },
+  overviewEmailBelowAvatar: {
+    marginTop: 8,
+    textAlign: 'center',
+    fontSize: 12,
+    lineHeight: 16,
+    width: '100%',
+    paddingHorizontal: 4,
+  },
+  overviewBadgeRowMobile: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    width: '100%',
+    marginTop: 6,
+  },
+  overviewTextCol: {
+    flex: 1,
+    minWidth: 0,
+    justifyContent: 'center',
+  },
+  overviewEmailSubRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginTop: 8,
+    width: '100%',
+  },
+  overviewAvatarBlock: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    maxWidth: '100%',
+  },
+  /** Avatar stacked above full-width vertical actions while editing */
+  overviewAvatarBlockEditing: {
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    alignSelf: 'stretch',
+    width: '100%',
+    gap: 12,
+  },
+  avatarEditBlock: {
+    width: '100%',
+    gap: 8,
+  },
+  avatarEditBlockCompact: {
+    gap: 6,
+  },
+  /** Compact: small icon buttons in one row */
+  avatarPhotoActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    width: '100%',
+  },
+  avatarActionIconOnlySmall: {
+    flex: 1,
+    minHeight: 36,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+  },
+  /** Narrow phones: shorter tap targets, smaller icons */
+  avatarActionIconOnlyMobile: {
+    minHeight: 32,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  avatarActionIconOnlyDanger: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+  },
+  /** Wider screens: smaller text-only rows */
+  avatarActionTextOnlySmall: {
+    width: '100%',
+    minHeight: 36,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarActionTextOnlyMuted: {
+    backgroundColor: 'transparent',
+  },
+  avatarActionTextOnlyLabelSmall: {
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
   overviewCol: {
     flex: 1,
     minWidth: 0,
@@ -1490,10 +1836,40 @@ const styles = StyleSheet.create({
   overviewBottom: {
     borderTopWidth: 1,
     padding: 14,
-    alignItems: 'flex-end',
+    alignItems: 'stretch',
   },
   overviewBottomCompact: {
     padding: 10,
+  },
+  overviewEditActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    flexWrap: 'wrap',
+    gap: 10,
+    alignSelf: 'stretch',
+  },
+  cancelEditBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 40,
+  },
+  cancelEditBtnCompact: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    minHeight: 38,
+    borderRadius: 8,
+  },
+  cancelEditBtnText: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  cancelEditBtnTextCompact: {
+    fontSize: 13,
   },
   avatarContainer: {
     width: 80,
@@ -1502,10 +1878,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  /** Overview on phones: ~2× prior 64px avatar for clearer photo */
   avatarContainerCompact: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
+    width: 128,
+    height: 128,
+    borderRadius: 64,
   },
   avatarText: {
     color: '#fff',
@@ -1513,7 +1890,7 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
   avatarTextCompact: {
-    fontSize: 26,
+    fontSize: 44,
   },
   avatarImage: {
     width: '100%',
@@ -1521,36 +1898,7 @@ const styles = StyleSheet.create({
     borderRadius: 40,
   },
   avatarImageCompact: {
-    borderRadius: 32,
-  },
-  avatarModalPrimaryBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 14,
-    borderRadius: 10,
-    marginBottom: 10,
-  },
-  avatarModalPrimaryBtnText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  avatarModalDangerBtn: {
-    paddingVertical: 12,
-    borderRadius: 10,
-    borderWidth: 1,
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  avatarModalDangerBtnText: {
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  avatarModalCancelBtn: {
-    paddingVertical: 12,
-    alignItems: 'center',
+    borderRadius: 64,
   },
   userName: {
     fontSize: 22,
@@ -1681,6 +2029,43 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     gap: 8,
     minHeight: 44,
+  },
+  /** Full-width “dropdown” rows inside the personal-info card (matches grid full-bleed fields). */
+  selectRowFullWidth: {
+    alignSelf: 'stretch',
+    width: '100%',
+  },
+  dobRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    width: '100%',
+    alignSelf: 'stretch',
+    gap: 8,
+  },
+  dobTextInput: {
+    flex: 1,
+    minWidth: 0,
+  },
+  dobCalendarBtn: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderRadius: 8,
+    minWidth: 48,
+  },
+  dobCalendarBtnCompact: {
+    paddingHorizontal: 10,
+    minWidth: 44,
+  },
+  dobHint: {
+    fontSize: 13,
+    marginTop: 6,
+  },
+  webDateInputWrap: {
+    borderWidth: 1,
+    borderRadius: 10,
+    overflow: 'hidden',
   },
   selectRowText: {
     fontSize: 16,

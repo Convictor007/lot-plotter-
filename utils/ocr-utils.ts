@@ -17,6 +17,13 @@ export type ScanReviewMeta = {
   tiePointReference?: string | null;
 };
 
+/** One parcel from a scan (single lot or one row of a multi-lot table). */
+export type ScannedLot = {
+  lotNo?: string | null;
+  claimant?: string | null;
+  corners: ParsedCorner[];
+};
+
 async function buildImageFormDataAsync(uri: string): Promise<FormData> {
   const formData = new FormData();
 
@@ -35,13 +42,44 @@ async function buildImageFormDataAsync(uri: string): Promise<FormData> {
   return formData;
 }
 
-type InterpretScanOk = { ok: true; corners: ParsedCorner[]; meta: ScanReviewMeta };
+type InterpretScanOk = { ok: true; lots: ScannedLot[]; meta: ScanReviewMeta };
 type InterpretScanFail = { ok: false; message?: string };
+
+function normalizeLotsFromApiJson(json: Record<string, unknown>): ScannedLot[] | null {
+  const rawLots = json.lots;
+  if (Array.isArray(rawLots) && rawLots.length > 0) {
+    const out: ScannedLot[] = [];
+    for (const item of rawLots) {
+      if (!item || typeof item !== 'object') continue;
+      const row = item as Record<string, unknown>;
+      const corners = Array.isArray(row.corners) ? (row.corners as ParsedCorner[]) : [];
+      const filtered = corners.filter(
+        (c) => c && typeof c.ns === 'string' && typeof c.ew === 'string' && String(c.distance || '').length > 0
+      );
+      if (filtered.length === 0) continue;
+      const lotNo =
+        row.lotNo === null || row.lotNo === undefined
+          ? null
+          : String(row.lotNo).trim() || null;
+      const claimant =
+        row.claimant === null || row.claimant === undefined
+          ? null
+          : String(row.claimant).trim() || null;
+      out.push({ lotNo, claimant, corners: filtered });
+    }
+    return out.length > 0 ? out : null;
+  }
+  const data = json.data;
+  if (Array.isArray(data) && data.length > 0) {
+    return [{ corners: data as ParsedCorner[] }];
+  }
+  return null;
+}
 
 /** Gemini / Ollama vision via `/api/ocr-interpret` (server-side). */
 async function fetchOllamaInterpret(uri: string): Promise<ParsedCorner[] | null> {
   const full = await fetchInterpretScan(uri);
-  return full.ok ? full.corners : null;
+  return full.ok && full.lots[0]?.corners?.length ? full.lots[0].corners : null;
 }
 
 async function fetchInterpretScan(uri: string): Promise<InterpretScanOk | InterpretScanFail> {
@@ -60,25 +98,28 @@ async function fetchInterpretScan(uri: string): Promise<InterpretScanOk | Interp
       return { ok: false, message: 'Invalid response from AI scan service.' };
     }
 
-    if (res.ok && json?.success && Array.isArray(json.data) && json.data.length > 0) {
-      const warnings = Array.isArray(json.warnings) ? (json.warnings as string[]) : undefined;
-      const tiePointReference =
-        typeof json.tiePointReference === 'string' && json.tiePointReference.trim()
-          ? json.tiePointReference.trim()
-          : json.tiePointReference === null
-            ? null
-            : undefined;
-      return {
-        ok: true,
-        corners: json.data as ParsedCorner[],
-        meta: {
-          extractionPath: 'ai',
-          source: json.source as ScanReviewMeta['source'],
-          model: typeof json.model === 'string' ? json.model : undefined,
-          warnings,
-          tiePointReference,
-        },
-      };
+    if (res.ok && json?.success) {
+      const lots = normalizeLotsFromApiJson(json as Record<string, unknown>);
+      if (lots && lots.length > 0) {
+        const warnings = Array.isArray(json.warnings) ? (json.warnings as string[]) : undefined;
+        const tiePointReference =
+          typeof json.tiePointReference === 'string' && json.tiePointReference.trim()
+            ? json.tiePointReference.trim()
+            : json.tiePointReference === null
+              ? null
+              : undefined;
+        return {
+          ok: true,
+          lots,
+          meta: {
+            extractionPath: 'ai',
+            source: json.source as ScanReviewMeta['source'],
+            model: typeof json.model === 'string' ? json.model : undefined,
+            warnings,
+            tiePointReference,
+          },
+        };
+      }
     }
 
     const message = typeof json?.message === 'string' ? json.message : `AI scan failed (${res.status})`;
@@ -135,10 +176,10 @@ const TESSERACT_REVIEW_WARNINGS = [
  * AI scan first (Gemini when `GEMINI_API_KEY` is set on the server), then Tesseract.
  * Use with a review modal before applying rows to the lot plotter.
  */
-export async function scanLandTitleImage(uri: string): Promise<{ corners: ParsedCorner[]; meta: ScanReviewMeta }> {
+export async function scanLandTitleImage(uri: string): Promise<{ lots: ScannedLot[]; meta: ScanReviewMeta }> {
   const fromAi = await fetchInterpretScan(uri);
   if (fromAi.ok) {
-    return { corners: fromAi.corners, meta: fromAi.meta };
+    return { lots: fromAi.lots, meta: fromAi.meta };
   }
 
   const corners = await fetchTesseractOcr(uri);
@@ -147,7 +188,7 @@ export async function scanLandTitleImage(uri: string): Promise<{ corners: Parsed
     warnings.unshift(`AI scan did not complete: ${fromAi.message}`);
   }
   return {
-    corners,
+    lots: [{ corners }],
     meta: {
       extractionPath: 'tesseract',
       warnings,

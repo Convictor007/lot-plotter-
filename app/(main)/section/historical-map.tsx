@@ -94,24 +94,31 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     margin: -20, // Negative margin to counteract the 20px padding from the main layout
+    overflow: 'visible',
   },
   content: {
     flex: 1,
     flexDirection: 'column',
+    overflow: 'visible',
   },
   mapContainer: {
     flex: 1,
     minHeight: 400, // Ensure it has height on mobile
+    zIndex: 0,
   },
   infoPanel: {
     borderTopWidth: 1,
     padding: 16,
-    position: 'relative', // Added for the toggle button
+    position: 'relative',
+    zIndex: 10,
+    overflow: 'visible',
   },
+  /** `height: 0` clipped the absolutely positioned chevron on Android; keep a minimal box + overflow visible. */
   infoPanelMobileCollapsed: {
     padding: 0,
     borderTopWidth: 0,
-    height: 0,
+    minHeight: 8,
+    overflow: 'visible',
   },
   infoPanelWeb: {
     borderTopWidth: 0,
@@ -132,12 +139,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#3b5998', // Keep primary color
     justifyContent: 'center',
     alignItems: 'center',
-    zIndex: 10,
+    zIndex: 50,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.2,
     shadowRadius: 4,
-    elevation: 4,
+    elevation: 24,
   },
   toggleBtnWeb: {
     left: -28, // Stick out to the left of the panel

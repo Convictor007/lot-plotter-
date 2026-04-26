@@ -11,6 +11,7 @@ import Constants from 'expo-constants';
 import { WebView } from 'react-native-webview';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import gisUtils from '@/utils/gis-utils';
+import { MapNorthCompassOverlay, MAP_COMPASS_CONTROL_TOP } from '@/components/gis/MapNorthCompassOverlay';
 
 declare namespace GeoJSON {
   interface FeatureCollection {
@@ -126,10 +127,6 @@ const PREVIEW_ZOOM = 11;
 const PREVIEW_W = 160;
 const PREVIEW_H = 100;
 
-const COMPASS_PNG = require('../../assets/images/compass2.png');
-/** Compass overlay size in the WebView map (2× former 68px). */
-const COMPASS_DISPLAY_PX = 136;
-
 /** Minimap thumbnail from Google Static Maps API. */
 function buildBasemapPreviewUri(
   basemap: BasemapStyle,
@@ -228,6 +225,7 @@ function WebMapViewGoogle({
   showDistanceLabel = true,
   onRegionChange,
 }: MapViewProps) {
+  const [mapHeading, setMapHeading] = useState(0);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const onRegionChangeRef = useRef(onRegionChange);
   onRegionChangeRef.current = onRegionChange;
@@ -361,12 +359,17 @@ function WebMapViewGoogle({
           });
         }
 
-        map.addListener('idle', () => {
-          if (mapInstanceRef.current) {
-            const c = mapInstanceRef.current.getCenter();
-            onRegionChangeRef.current?.({ lat: c.lat(), lng: c.lng() }, mapInstanceRef.current.getZoom());
-          }
-        });
+        const pushRegion = () => {
+          if (!mapInstanceRef.current) return;
+          const m = mapInstanceRef.current;
+          const c = m.getCenter();
+          const hd = typeof m.getHeading === 'function' ? m.getHeading() : 0;
+          const h = typeof hd === 'number' && !isNaN(hd) ? hd : 0;
+          setMapHeading(h);
+          onRegionChangeRef.current?.({ lat: c.lat(), lng: c.lng() }, m.getZoom());
+        };
+        map.addListener('idle', pushRegion);
+        map.addListener('heading_changed', pushRegion);
 
         setMapNonce((n) => n + 1);
       } catch (err) {
@@ -439,10 +442,9 @@ function WebMapViewGoogle({
       const displayArea = area !== undefined ? area : gisUtils.calculatePolygonArea(polygon.coordinates);
 
       const infoWindow = new g.InfoWindow({
-        content: `<div style="text-align: center; color: #333; font-family: sans-serif; padding: 2px;">
-                <div style="font-size: 11px; font-weight: bold;">Approximate area:</div>
-                <div style="font-size: 13px; font-weight: bold; color: ${polygon.color || '#8e1616'};">${displayArea.toFixed(3)} m&sup2;</div>
-                <div style="font-size: 9px; margin-top: 2px;">Note: This cannot be used for legal purposes.</div>
+        content: `<div style="text-align: center; color: #333; font-family: sans-serif; padding: 4px 6px;">
+                <div style="font-size: 13px; font-weight: bold; color: ${polygon.color || '#8e1616'};">${displayArea.toFixed(3)} sqm</div>
+                <div style="font-size: 9px; margin-top: 4px;">Note: This cannot be used for legal purposes.</div>
               </div>`,
         position: { lat: centroid.lat, lng: centroid.lng },
         disableAutoPan: true,
@@ -473,11 +475,21 @@ function WebMapViewGoogle({
   }
 
   return (
-    <View style={[styles.container, style]}>
+    <View style={[styles.container, style, { position: 'relative', minHeight: 250 }]}>
       <div
         ref={mapContainerRef}
-        style={{ width: '100%', height: '100%', minHeight: 250, borderRadius: 12 }}
+        style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, borderRadius: 12 }}
       />
+      <View style={{ position: 'absolute', top: MAP_COMPASS_CONTROL_TOP, right: 10, zIndex: 20 }}>
+        <MapNorthCompassOverlay
+          bearingDeg={mapHeading}
+          onResetNorth={() => {
+            try {
+              mapInstanceRef.current?.setHeading?.(0);
+            } catch (_) {}
+          }}
+        />
+      </View>
     </View>
   );
 }
@@ -501,6 +513,7 @@ function NativeMapViewGoogleWebView({
   showDistanceLabel = true,
   onRegionChange,
 }: MapViewProps) {
+  const [mapHeading, setMapHeading] = useState(0);
   const webviewRef = useRef<WebView>(null);
   const onRegionChangeRef = useRef(onRegionChange);
   onRegionChangeRef.current = onRegionChange;
@@ -561,18 +574,6 @@ function NativeMapViewGoogleWebView({
       area: area !== undefined && area !== null ? area : null,
     });
 
-    const compassUri = Image.resolveAssetSource(COMPASS_PNG)?.uri;
-    const compassMarkup = compassUri
-      ? `<img id="map-compass" src="${compassUri}" alt="" />`
-      : `<svg id="map-compass" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${COMPASS_DISPLAY_PX} ${COMPASS_DISPLAY_PX}" aria-hidden="true">
-          <circle cx="68" cy="68" r="62" fill="rgba(255,255,255,0.94)" stroke="#333" stroke-width="2.4"/>
-          <text x="68" y="32" text-anchor="middle" fill="#111" font-size="24" font-weight="bold" font-family="system-ui,sans-serif">N</text>
-          <text x="112" y="76" text-anchor="middle" fill="#333" font-size="20" font-weight="600" font-family="system-ui,sans-serif">E</text>
-          <text x="68" y="120" text-anchor="middle" fill="#333" font-size="20" font-weight="600" font-family="system-ui,sans-serif">S</text>
-          <text x="24" y="76" text-anchor="middle" fill="#333" font-size="20" font-weight="600" font-family="system-ui,sans-serif">W</text>
-          <path d="M 68 44 L 58 72 L 66 72 L 66 96 L 70 96 L 70 72 L 78 72 Z" fill="#b91c1c" stroke="#7f1d1d" stroke-width="1"/>
-        </svg>`;
-
     return `
       <!DOCTYPE html>
       <html>
@@ -582,17 +583,11 @@ function NativeMapViewGoogleWebView({
           body { margin: 0; padding: 0; background: #f3f6f9; }
           #map-shell { position: relative; width: 100%; height: 100vh; }
           #map { width: 100%; height: 100%; }
-          #map-compass {
-            position: absolute; top: 12px; right: 12px; z-index: 5;
-            width: ${COMPASS_DISPLAY_PX}px; height: ${COMPASS_DISPLAY_PX}px; pointer-events: none;
-            filter: drop-shadow(0 1px 2px rgba(0,0,0,0.35));
-          }
         </style>
       </head>
       <body>
         <div id="map-shell">
         <div id="map"></div>
-        ${compassMarkup}
         </div>
         <script>
           function calcDist(lat1, lon1, lat2, lon2) {
@@ -657,10 +652,9 @@ function NativeMapViewGoogleWebView({
               var displayArea = opts.area != null ? opts.area : calcArea(coords);
               var polyColor = opts.strokeColor || '#8e1616';
               var infoWindow = new g.InfoWindow({
-                content: '<div style="text-align: center; color: #333; font-family: sans-serif; padding: 2px; margin: 0; overflow: hidden;">' +
-                  '<div style="font-size: 11px; font-weight: bold; line-height: 1.2;">Approximate area:</div>' +
-                  '<div style="font-size: 13px; font-weight: bold; color: ' + polyColor + '; line-height: 1.2;">' + displayArea.toFixed(3) + ' m&sup2;</div>' +
-                  '<div style="font-size: 9px; margin-top: 2px; line-height: 1.1;">Note: This cannot be used for legal purposes.</div>' +
+                content: '<div style="text-align: center; color: #333; font-family: sans-serif; padding: 4px 6px; margin: 0; overflow: hidden;">' +
+                  '<div style="font-size: 13px; font-weight: bold; color: ' + polyColor + '; line-height: 1.2;">' + displayArea.toFixed(3) + ' sqm</div>' +
+                  '<div style="font-size: 9px; margin-top: 4px; line-height: 1.1;">Note: This cannot be used for legal purposes.</div>' +
                 '</div>',
                 position: { lat: centroid.lat, lng: centroid.lng },
                 disableAutoPan: true
@@ -755,13 +749,17 @@ function NativeMapViewGoogleWebView({
               });
             }
 
-            map.addListener('idle', function() {
+            function iassessPostRegion() {
               var c = map.getCenter();
-              var msg = { type: 'REGION_CHANGE', center: { lat: c.lat(), lng: c.lng() }, zoom: map.getZoom() };
+              var hd = typeof map.getHeading === 'function' ? map.getHeading() : 0;
+              if (hd == null || isNaN(hd)) hd = 0;
+              var msg = { type: 'REGION_CHANGE', center: { lat: c.lat(), lng: c.lng() }, zoom: map.getZoom(), heading: hd };
               if (window.ReactNativeWebView) {
                 window.ReactNativeWebView.postMessage(JSON.stringify(msg));
               }
-            });
+            }
+            map.addListener('idle', iassessPostRegion);
+            map.addListener('heading_changed', iassessPostRegion);
           }
         </script>
         <script async defer src="https://maps.googleapis.com/maps/api/js?key=${key}&callback=initMap"></script>
@@ -779,7 +777,7 @@ function NativeMapViewGoogleWebView({
   }
 
   return (
-    <View style={[styles.container, style]}>
+    <View style={[styles.container, style, { position: 'relative' }]}>
       <WebView
         ref={webviewRef}
         originWhitelist={['*']}
@@ -792,6 +790,9 @@ function NativeMapViewGoogleWebView({
           try {
             const data = JSON.parse(event.nativeEvent.data);
             if (data.type === 'REGION_CHANGE') {
+              if (typeof data.heading === 'number' && !isNaN(data.heading)) {
+                setMapHeading(data.heading);
+              }
               onRegionChangeRef.current?.(data.center, data.zoom);
             }
           } catch (e) {}
@@ -810,6 +811,21 @@ function NativeMapViewGoogleWebView({
           `);
         }}
       />
+      <View style={styles.compassOverlay}>
+        <MapNorthCompassOverlay
+          bearingDeg={mapHeading}
+          onResetNorth={() => {
+            webviewRef.current?.injectJavaScript(`
+              try {
+                if (window.map && typeof window.map.setHeading === 'function') {
+                  window.map.setHeading(0);
+                }
+              } catch (e) {}
+              true;
+            `);
+          }}
+        />
+      </View>
     </View>
   );
 }
@@ -1114,6 +1130,12 @@ const styles = StyleSheet.create({
     flex: 1,
     borderRadius: 12,
     overflow: 'hidden',
+  },
+  compassOverlay: {
+    position: 'absolute',
+    top: MAP_COMPASS_CONTROL_TOP,
+    right: 10,
+    zIndex: 20,
   },
   map: {
     width: '100%',

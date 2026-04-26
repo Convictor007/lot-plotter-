@@ -5,7 +5,7 @@
 export type UserRole = 'citizen' | 'assessor' | 'admin';
 
 /** Matches `users.verification_status` ENUM in schema.sql */
-export type VerificationStatus = 'unverified' | 'pending' | 'verified';
+export type VerificationStatus = 'unverified' | 'pending' | 'verified' | 'rejected';
 
 export type TransactionStatus =
   | 'draft'

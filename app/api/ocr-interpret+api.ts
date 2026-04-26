@@ -7,7 +7,7 @@ import {
   getGeminiModel,
 } from '@/lib/gemini-survey';
 import { extractJsonObjectFromLlmText, getOllamaBaseUrl, getOllamaModel, ollamaVisionSurveyJson } from '@/lib/ollama-interpret';
-import { extractTiePointReferenceFromLlmPayload, normalizeOllamaCornersPayload } from '@/lib/ocr-survey-parse';
+import { normalizeOllamaLotsPayload } from '@/lib/ocr-survey-parse';
 
 function parseModelJson(rawLlm: string): { parsed: unknown; error: string | null } {
   try {
@@ -82,10 +82,10 @@ export async function POST(req: ExpoRequest) {
       );
     }
 
-    const corners = normalizeOllamaCornersPayload(parsed);
-    const tiePointReference = extractTiePointReferenceFromLlmPayload(parsed);
+    const { tiePointReference, lots: parsedLots } = normalizeOllamaLotsPayload(parsed);
+    const lots = parsedLots.filter((l) => l.corners.length > 0);
 
-    if (corners.length === 0) {
+    if (lots.length === 0) {
       return Response.json({
         success: false,
         message:
@@ -95,14 +95,29 @@ export async function POST(req: ExpoRequest) {
       });
     }
 
+    const data = lots[0].corners;
+
     return Response.json({
       success: true,
-      data: corners,
+      data,
+      lots: lots.map((l) => ({
+        lotNo: l.lotNo,
+        claimant: l.claimant,
+        corners: l.corners.map((c) => ({
+          ns: c.ns,
+          deg: c.deg,
+          min: c.min,
+          ew: c.ew,
+          distance: c.distance,
+        })),
+      })),
       tiePointReference,
       source,
       model: modelLabel,
       warnings: [
-        'Line 1 should be from the document tie monument to corner 1; verify tiePointReference and all distances.',
+        lots.length > 1
+          ? `Multiple lots extracted (${lots.length}). Each lot's line 1 is monument → corner 1 for that parcel. Switch lots in review before OK.`
+          : 'Line 1 should be from the document tie monument to corner 1; verify tiePointReference and all distances.',
         'Review all values against the document before plotting. Vision models can still make mistakes.',
       ],
     });

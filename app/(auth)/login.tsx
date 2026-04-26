@@ -23,6 +23,7 @@ import {
 } from '@/constants/mockAuth';
 import type { PublicUserJson } from '@/database/models';
 import { apiUrl } from '@/lib/api/api-url';
+import { requestFacebookAccessToken, requestGoogleIdToken } from '@/lib/auth/social-client';
 import { removeItem, SESSION_AUTH_TOKEN_KEY, setAuthSession, setSessionUserEmail } from '@/lib/authSession';
 
 const COLORS = {
@@ -121,6 +122,70 @@ export default function LoginScreen() {
     setPassword(MOCK_LOGIN_PASSWORD);
   };
 
+  const handleGoogleLogin = async () => {
+    if (isLoading) return;
+    setIsLoading(true);
+    Keyboard.dismiss();
+    try {
+      const idToken = await requestGoogleIdToken();
+      const res = await fetch(apiUrl('/api/auth/google'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id_token: idToken }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        token?: string;
+        user?: PublicUserJson;
+        message?: string;
+      };
+      if (res.ok && data.success && data.token && data.user?.email) {
+        await setAuthSession(data.user.email, data.token);
+        router.replace('/section/lot-plotter');
+        return;
+      }
+      Alert.alert('Google Sign-In Failed', data.message || 'Could not sign in with Google.');
+    } catch (e: any) {
+      const msg = String(e?.message || '');
+      if (msg.includes('cancelled')) return;
+      Alert.alert('Google Sign-In Failed', msg || 'Could not sign in with Google.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleFacebookLogin = async () => {
+    if (isLoading) return;
+    setIsLoading(true);
+    Keyboard.dismiss();
+    try {
+      const accessToken = await requestFacebookAccessToken();
+      const res = await fetch(apiUrl('/api/auth/facebook'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ access_token: accessToken }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        token?: string;
+        user?: PublicUserJson;
+        message?: string;
+      };
+      if (res.ok && data.success && data.token && data.user?.email) {
+        await setAuthSession(data.user.email, data.token);
+        router.replace('/section/lot-plotter');
+        return;
+      }
+      Alert.alert('Facebook Sign-In Failed', data.message || 'Could not sign in with Facebook.');
+    } catch (e: any) {
+      const msg = String(e?.message || '');
+      if (msg.includes('cancelled')) return;
+      Alert.alert('Facebook Sign-In Failed', msg || 'Could not sign in with Facebook.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   return (
     <ImageBackground source={BG_IMAGE} style={styles.backgroundImage} resizeMode="cover">
       <View style={styles.overlay}>
@@ -136,7 +201,7 @@ export default function LoginScreen() {
                 <Image source={LOGO_BALATAN} style={styles.largeLogo} resizeMode="contain" />
               </View>
               <Text style={styles.muniTitle}>MUNICIPALITY OF BALATAN</Text>
-              <Text style={styles.assessorTitle}>MUNICIPAL ASSESSOR'S OFFICE</Text>
+              <Text style={styles.assessorTitle}>MUNICIPAL ASSESSOR&apos;S OFFICE</Text>
               
               <Text style={styles.welcomeText}>WELCOME</Text>
 
@@ -224,8 +289,33 @@ export default function LoginScreen() {
                   </Text>
                 </TouchableOpacity>
 
+                <View style={styles.socialDividerRow}>
+                  <View style={styles.socialDividerLine} />
+                  <Text style={styles.socialDividerText}>or continue with</Text>
+                  <View style={styles.socialDividerLine} />
+                </View>
+
+                <View style={styles.socialButtonsRow}>
+                  <TouchableOpacity
+                    style={[styles.socialButton, styles.googleButton, isLoading && styles.socialButtonDisabled]}
+                    onPress={handleGoogleLogin}
+                    disabled={isLoading}
+                  >
+                    <Ionicons name="logo-google" size={18} color="#DB4437" />
+                    <Text style={styles.socialButtonText}>Google</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.socialButton, styles.facebookButton, isLoading && styles.socialButtonDisabled]}
+                    onPress={handleFacebookLogin}
+                    disabled={isLoading}
+                  >
+                    <Ionicons name="logo-facebook" size={18} color="#1877F2" />
+                    <Text style={styles.socialButtonText}>Facebook</Text>
+                  </TouchableOpacity>
+                </View>
+
                 <View style={styles.signupContainer}>
-                  <Text style={styles.signupText}>Don't have an account? </Text>
+                  <Text style={styles.signupText}>Don&apos;t have an account? </Text>
                   <TouchableOpacity onPress={() => router.push('/(auth)/register')}>
                     <Text style={styles.signupLink}>Register here</Text>
                   </TouchableOpacity>
@@ -510,6 +600,49 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
     fontSize: 13,
     fontWeight: 'bold',
+  },
+  socialDividerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 14,
+  },
+  socialDividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#D6D6D6',
+  },
+  socialDividerText: {
+    color: COLORS.gray,
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  socialButtonsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 18,
+  },
+  socialButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: '#D0D0D0',
+    borderRadius: 12,
+    paddingVertical: 11,
+    backgroundColor: '#fff',
+  },
+  googleButton: {},
+  facebookButton: {},
+  socialButtonText: {
+    color: COLORS.text,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  socialButtonDisabled: {
+    opacity: 0.55,
   },
   loadingOverlay: {
     ...StyleSheet.absoluteFillObject,

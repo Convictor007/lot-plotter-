@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS users (
   barangay VARCHAR(120) DEFAULT NULL,
   municipality VARCHAR(120) NOT NULL,
   province VARCHAR(120) NOT NULL,
-  verification_status ENUM('unverified', 'pending', 'verified') NOT NULL DEFAULT 'unverified',
+  verification_status ENUM('unverified', 'pending', 'verified', 'rejected') NOT NULL DEFAULT 'unverified',
   id_document_file_name VARCHAR(512) DEFAULT NULL,
   id_document_mime_type VARCHAR(128) DEFAULT NULL,
   profile_picture_file_name VARCHAR(512) DEFAULT NULL,

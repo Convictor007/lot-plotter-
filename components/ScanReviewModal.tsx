@@ -14,16 +14,17 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useTheme } from '@/contexts/ThemeContext';
 import type { TiePoint } from '@/services/tiepoints.service';
-import type { ParsedCorner, ScanReviewMeta } from '@/utils/ocr-utils';
+import type { ParsedCorner, ScanReviewMeta, ScannedLot } from '@/utils/ocr-utils';
 
 export type ScanReviewModalProps = {
   visible: boolean;
-  corners: ParsedCorner[];
+  /** One or more parcels (multi-lot tables return multiple entries). */
+  lots: ScannedLot[];
   meta: ScanReviewMeta | null;
   /** Best row from `tiepoints-2025.json` for the document tie text (if any). */
   catalogMatch?: TiePoint | null;
   onDismiss: () => void;
-  onApply: (corners: ParsedCorner[]) => void;
+  onApply: (lots: ScannedLot[]) => void;
 };
 
 type DraftRow = ParsedCorner & { key: string };
@@ -34,9 +35,14 @@ function formatBearing(c: ParsedCorner): string {
   return `${c.ns} ${d}° ${m}' ${c.ew}`;
 }
 
+function lotChipLabel(lot: ScannedLot, index: number): string {
+  if (lot.lotNo?.trim()) return `Lot ${lot.lotNo.trim()}`;
+  return `Lot ${index + 1}`;
+}
+
 export function ScanReviewModal({
   visible,
-  corners,
+  lots,
   meta,
   catalogMatch = null,
   onDismiss,
@@ -45,23 +51,29 @@ export function ScanReviewModal({
   const insets = useSafeAreaInsets();
   const { width: windowWidth } = useWindowDimensions();
   const { colors } = useTheme();
-  const [draft, setDraft] = useState<DraftRow[]>([]);
+  const [drafts, setDrafts] = useState<DraftRow[][]>([]);
+  const [selectedLotIdx, setSelectedLotIdx] = useState(0);
   const [isEditing, setIsEditing] = useState(false);
 
   const compact = windowWidth < 400;
   const maxContentWidth = Math.min(560, windowWidth);
 
+  const draft = drafts[selectedLotIdx] ?? [];
+
   useEffect(() => {
-    if (visible && corners.length > 0) {
-      setDraft(
-        corners.map((c, i) => ({
-          ...c,
-          key: `scan-${i}-${c.ns}-${c.deg}-${c.min}-${c.ew}-${c.distance}`,
-        }))
+    if (visible && lots.length > 0) {
+      setDrafts(
+        lots.map((lot) =>
+          lot.corners.map((c, i) => ({
+            ...c,
+            key: `scan-${i}-${c.ns}-${c.deg}-${c.min}-${c.ew}-${c.distance}`,
+          }))
+        )
       );
+      setSelectedLotIdx(0);
       setIsEditing(false);
     }
-  }, [visible, corners]);
+  }, [visible, lots]);
 
   /** No model names in UI (user preference); generic scan hint only. */
   const scanHint = useMemo(() => {
@@ -71,16 +83,25 @@ export function ScanReviewModal({
   }, [meta]);
 
   const updateRow = (key: string, patch: Partial<ParsedCorner>) => {
-    setDraft((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+    setDrafts((prev) => {
+      if (!prev[selectedLotIdx]) return prev;
+      const next = [...prev];
+      next[selectedLotIdx] = next[selectedLotIdx].map((r) => (r.key === key ? { ...r, ...patch } : r));
+      return next;
+    });
   };
 
   const handleApply = () => {
-    const out: ParsedCorner[] = draft.map(({ ns, deg, min, ew, distance }) => ({
-      ns,
-      deg,
-      min,
-      ew,
-      distance,
+    const out: ScannedLot[] = drafts.map((rows, i) => ({
+      lotNo: lots[i]?.lotNo ?? null,
+      claimant: lots[i]?.claimant ?? null,
+      corners: rows.map(({ ns, deg, min, ew, distance }) => ({
+        ns,
+        deg,
+        min,
+        ew,
+        distance,
+      })),
     }));
     onApply(out);
     onDismiss();
@@ -125,6 +146,48 @@ export function ScanReviewModal({
             </View>
           ) : null}
 
+          {lots.length > 1 ? (
+            <View style={[styles.multiLotBanner, { backgroundColor: colors.contentBg, borderColor: colors.primary }]}>
+              <Ionicons name="layers-outline" size={22} color={colors.primary} style={{ marginRight: 10 }} />
+              <Text style={[styles.multiLotBannerText, { color: colors.text }]}>
+                {lots.length} lots in this image. Pick a tab below — for each lot, line 1 is{' '}
+                <Text style={{ fontWeight: '800' }}>MON → corner 1</Text> (may differ per lot).
+              </Text>
+            </View>
+          ) : null}
+
+          {lots.length > 1 ? (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.lotChipScroll}
+              contentContainerStyle={styles.lotChipRow}
+            >
+              {lots.map((lot, i) => (
+                <TouchableOpacity
+                  key={`lot-tab-${i}-${lot.lotNo ?? ''}`}
+                  style={[
+                    styles.lotChip,
+                    { borderColor: colors.border, backgroundColor: colors.cardBg },
+                    selectedLotIdx === i && { borderColor: colors.primary, backgroundColor: colors.contentBg },
+                  ]}
+                  onPress={() => setSelectedLotIdx(i)}
+                >
+                  <Text
+                    style={[
+                      styles.lotChipText,
+                      { color: colors.text },
+                      selectedLotIdx === i && { color: colors.primary, fontWeight: '800' },
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {lotChipLabel(lot, i)}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          ) : null}
+
           {meta?.tiePointReference ? (
             <View style={[styles.tieDocBox, { backgroundColor: colors.cardBg, borderColor: colors.border }]}>
               <Text style={[styles.tieDocTitle, { color: colors.textMuted }]}>Tie point (from document)</Text>
@@ -132,7 +195,7 @@ export function ScanReviewModal({
                 {meta.tiePointReference}
               </Text>
               <Text style={[styles.tieDocHint, { color: colors.textMuted }]}>
-                Line 1 is the bearing and distance from this monument to corner 1.
+                For the selected lot, line 1 is the bearing and distance from this monument to corner 1.
               </Text>
             </View>
           ) : null}
@@ -388,6 +451,25 @@ const styles = StyleSheet.create({
   warnBulletRow: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 8 },
   warnBullet: { fontSize: 16, lineHeight: 22, marginRight: 8, fontWeight: '700' },
   warnText: { flex: 1, fontSize: 14, lineHeight: 21 },
+  multiLotBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginBottom: 12,
+  },
+  multiLotBannerText: { flex: 1, fontSize: 13, lineHeight: 19 },
+  lotChipScroll: { marginBottom: 12, maxHeight: 44 },
+  lotChipRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 4, paddingRight: 8 },
+  lotChip: {
+    marginRight: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+    borderWidth: 1,
+  },
+  lotChipText: { fontSize: 13, maxWidth: 160 },
   tieDocBox: {
     padding: 14,
     borderRadius: 12,

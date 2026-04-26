@@ -1,7 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
-import React, { useMemo, useState, useEffect, useRef } from 'react';
+import React, { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import { Platform, StyleSheet, View, Text, TouchableOpacity, ScrollView } from 'react-native';
 import { WebView } from 'react-native-webview';
+import { MapNorthCompassOverlay, MAP_COMPASS_CONTROL_TOP } from '@/components/gis/MapNorthCompassOverlay';
 
 interface ArcGISCompareMapProps {
   center: { lat: number; lng: number };
@@ -36,11 +37,23 @@ export default function ArcGISCompareMap({ center, zoom = 17, polygon, area, sho
   const [rightIdx, setRightIdx] = useState(3); // Older
   const [uiVisible, setUiVisible] = useState(true);
   const [showLabels, setShowLabels] = useState(true);
+  /** ArcGIS MapView.rotation (deg clockwise); drives north compass like Google heading. */
+  const [mapRotation, setMapRotation] = useState(0);
 
   const webviewRef = useRef<WebView>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const onRegionChangeRef = useRef(onRegionChange);
   onRegionChangeRef.current = onRegionChange;
+
+  const resetNorth = useCallback(() => {
+    if (isWeb && iframeRef.current?.contentWindow) {
+      iframeRef.current.contentWindow.postMessage({ type: 'RESET_NORTH' }, '*');
+    } else {
+      webviewRef.current?.injectJavaScript(
+        `try{if(typeof window.iassessResetNorth==='function'){window.iassessResetNorth();}}catch(e){}true;`
+      );
+    }
+  }, [isWeb]);
 
   const leftVersion = WAYBACK_VERSIONS[leftIdx];
   const rightVersion = WAYBACK_VERSIONS[rightIdx];
@@ -113,6 +126,9 @@ export default function ArcGISCompareMap({ center, zoom = 17, polygon, area, sho
         try {
           const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
           if (data.type === 'REGION_CHANGE') {
+            if (typeof data.rotation === 'number' && !isNaN(data.rotation)) {
+              setMapRotation(data.rotation);
+            }
             onRegionChangeRef.current?.(data.center, data.zoom);
           }
         } catch (e) {}
@@ -136,6 +152,9 @@ export default function ArcGISCompareMap({ center, zoom = 17, polygon, area, sho
           `);
         }
       } else if (data.type === 'REGION_CHANGE') {
+        if (typeof data.rotation === 'number' && !isNaN(data.rotation)) {
+          setMapRotation(data.rotation);
+        }
         onRegionChangeRef.current?.(data.center, data.zoom);
       }
     } catch (e) {}
@@ -171,6 +190,24 @@ export default function ArcGISCompareMap({ center, zoom = 17, polygon, area, sho
           }
           #label-left { left: 20px; }
           #label-right { right: 20px; }
+          #fitLotPolygonBtn {
+            display: none;
+            position: absolute;
+            bottom: 52px;
+            right: 12px;
+            z-index: 120;
+            padding: 10px 14px;
+            font-family: system-ui, -apple-system, sans-serif;
+            font-size: 13px;
+            font-weight: 600;
+            color: #fff;
+            background: #3b5998;
+            border: none;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+            cursor: pointer;
+          }
+          #fitLotPolygonBtn:active { opacity: 0.88; }
           #loading {
             position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
             color: white; font-family: sans-serif; font-size: 14px; z-index: 90;
@@ -180,6 +217,7 @@ export default function ArcGISCompareMap({ center, zoom = 17, polygon, area, sho
       <body>
         <div id="loading">Loading Map Imagery...</div>
         <div id="viewDiv"></div>
+        <button type="button" id="fitLotPolygonBtn">Locate</button>
         <div id="label-left" class="year-label"></div>
         <div id="label-right" class="year-label"></div>
         <script>
@@ -200,6 +238,9 @@ export default function ArcGISCompareMap({ center, zoom = 17, polygon, area, sho
             }
             if (data && data.type === "TOGGLE_OVERLAYS" && window.setOverlayVisibility) {
               window.setOverlayVisibility(data.showDistance, data.showArea);
+            }
+            if (data && data.type === "RESET_NORTH" && typeof window.iassessResetNorth === "function") {
+              window.iassessResetNorth();
             }
           });
 
@@ -267,6 +308,10 @@ export default function ArcGISCompareMap({ center, zoom = 17, polygon, area, sho
             view.ui.remove("zoom");
             view.ui.remove("attribution");
 
+            window.iassessResetNorth = function() {
+              if (view) view.rotation = 0;
+            };
+
             window.map = map;
             window.swipe = swipe;
             window.leftLayer = layerLeft;
@@ -332,14 +377,22 @@ export default function ArcGISCompareMap({ center, zoom = 17, polygon, area, sho
             var showArea = ${showAreaLabel};
             var polyArea = ${area !== undefined && area !== null ? area : 'null'};
 
-            view.watch("extent", function() {
-              var msg = { type: 'REGION_CHANGE', center: { lat: view.center.latitude, lng: view.center.longitude }, zoom: view.zoom };
+            function iassessPostArcRegion() {
+              var rot = view.rotation != null && !isNaN(view.rotation) ? view.rotation : 0;
+              var msg = {
+                type: 'REGION_CHANGE',
+                center: { lat: view.center.latitude, lng: view.center.longitude },
+                zoom: view.zoom,
+                rotation: rot
+              };
               if (window.ReactNativeWebView) {
                 window.ReactNativeWebView.postMessage(JSON.stringify(msg));
               } else {
                 window.parent.postMessage(msg, '*');
               }
-            });
+            }
+            view.watch("extent", iassessPostArcRegion);
+            view.watch("rotation", iassessPostArcRegion);
 
             function calcDist(lat1, lon1, lat2, lon2) {
               var R = 6371000;
@@ -367,6 +420,61 @@ export default function ArcGISCompareMap({ center, zoom = 17, polygon, area, sho
               return area * mLat * mLng;
             }
 
+            /** Match line-label sizing; when zoomed out (~>20 ft per pixel) bump font so labels stay readable. */
+            function refreshOverlayLabelSizes() {
+              if (!view) return;
+              var distList = window.distanceGraphics || [];
+              var areaList = window.areaGraphics || [];
+              if (!distList.length && !areaList.length) return;
+              var mpp = view.resolution;
+              if (mpp == null || !(mpp > 0) || !isFinite(mpp)) return;
+              var ftPerPx = mpp * 3.28084;
+              var linePt = 10;
+              if (ftPerPx > 20) {
+                var bump = Math.min(12, Math.round((ftPerPx - 20) / 6));
+                linePt = 10 + bump;
+              }
+              var areaPt = linePt + 1;
+              distList.forEach(function(g) {
+                if (!g || !g.symbol) return;
+                var sym = g.symbol;
+                g.symbol = new TextSymbol({
+                  text: sym.text,
+                  color: sym.color,
+                  haloColor: sym.haloColor || "white",
+                  haloSize: sym.haloSize != null ? sym.haloSize : 1,
+                  font: { size: linePt, weight: "bold" },
+                });
+              });
+              areaList.forEach(function(g) {
+                if (!g || !g.symbol) return;
+                var sym = g.symbol;
+                g.symbol = new TextSymbol({
+                  text: sym.text,
+                  color: sym.color,
+                  haloColor: sym.haloColor || "white",
+                  haloSize: sym.haloSize != null ? sym.haloSize : 2,
+                  font: { size: areaPt, weight: "bold" },
+                });
+              });
+            }
+
+            window.fitLotPolygonToView = function() {
+              if (!view || !window._lotPolygonGeom) return;
+              view
+                .goTo({ target: window._lotPolygonGeom, padding: 60 })
+                .catch(function(err) {
+                  if (err && err.name !== "AbortError") {
+                  }
+                });
+            };
+            var fitLotBtn = document.getElementById("fitLotPolygonBtn");
+            if (fitLotBtn) {
+              fitLotBtn.addEventListener("click", function() {
+                window.fitLotPolygonToView();
+              });
+            }
+
             if (polyData && polyData.coordinates && polyData.coordinates.length > 0) {
               var graphicsLayer = new GraphicsLayer();
               map.add(graphicsLayer);
@@ -388,6 +496,9 @@ export default function ArcGISCompareMap({ center, zoom = 17, polygon, area, sho
               });
               graphicsLayer.add(polygonGraphic);
 
+              window._lotPolygonGeom = polygonGraphic.geometry;
+              if (fitLotBtn) fitLotBtn.style.display = "block";
+
               var coords = polyData.coordinates;
               if (showDist) {
                 var polyColorForLabels = polyData.color || "#8e1616";
@@ -405,9 +516,9 @@ export default function ArcGISCompareMap({ center, zoom = 17, polygon, area, sho
                       text: "Line " + (i + 1) + "-" + nextCorner + ": " + dist.toFixed(1) + "m",
                       color: polyColorForLabels,
                       haloColor: "white",
-                      haloSize: "1px",
-                      font: { size: 10, weight: "bold" }
-                    })
+                      haloSize: 1,
+                      font: { size: 10, weight: "bold" },
+                    }),
                   });
                   graphicsLayer.add(textGraphic);
                   window.distanceGraphics.push(textGraphic);
@@ -421,18 +532,25 @@ export default function ArcGISCompareMap({ center, zoom = 17, polygon, area, sho
                 var areaTextGraphic = new Graphic({
                   geometry: new Point({ longitude: centroid.lng, latitude: centroid.lat }),
                   symbol: new TextSymbol({
-                    text: "Approximate area:\\n" + displayArea.toFixed(3) + " m²\\n(Not for legal use)",
+                    text: displayArea.toFixed(3) + " sqm",
                     color: polyColor,
                     haloColor: "white",
-                    haloSize: "2px",
-                    font: { size: 12, weight: "bold" }
-                  })
+                    haloSize: 2,
+                    font: { size: 11, weight: "bold" },
+                  }),
                 });
                 graphicsLayer.add(areaTextGraphic);
                 window.areaGraphics.push(areaTextGraphic);
               }
 
               window.setOverlayVisibility(showDist, showArea);
+
+              view.when(function() {
+                refreshOverlayLabelSizes();
+              });
+              view.watch("zoom", function() {
+                refreshOverlayLabelSizes();
+              });
             }
           });
         </script>
@@ -462,6 +580,10 @@ export default function ArcGISCompareMap({ center, zoom = 17, polygon, area, sho
           onMessage={handleMessage}
         />
       )}
+
+      <View style={styles.compassOverlay}>
+        <MapNorthCompassOverlay bearingDeg={mapRotation} onResetNorth={resetNorth} />
+      </View>
 
       {/* UI Overlays */}
       <TouchableOpacity 
@@ -535,7 +657,13 @@ const styles = StyleSheet.create({
     flex: 1,
     overflow: 'hidden',
     backgroundColor: '#e5e5e5',
-    position: 'relative'
+    position: 'relative',
+  },
+  compassOverlay: {
+    position: 'absolute',
+    top: MAP_COMPASS_CONTROL_TOP,
+    right: 10,
+    zIndex: 200,
   },
   sidebar: {
     position: 'absolute',
@@ -615,8 +743,8 @@ const styles = StyleSheet.create({
   },
   labelsBtn: {
     position: 'absolute',
-    top: 20,
-    right: 20,
+    top: MAP_COMPASS_CONTROL_TOP,
+    right: 66,
     backgroundColor: 'rgba(15, 23, 42, 0.9)',
     flexDirection: 'row',
     alignItems: 'center',

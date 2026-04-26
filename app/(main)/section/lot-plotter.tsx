@@ -23,7 +23,7 @@ import { ScanReviewModal } from '@/components/ScanReviewModal';
 import gisUtils from '@/utils/gis-utils';
 import tiepointsService, { TiePoint, findBestTiePointMatch } from '@/services/tiepoints.service';
 import { parseLotCsv } from '@/utils/csv-utils';
-import type { ParsedCorner, ScanReviewMeta } from '@/utils/ocr-utils';
+import type { ScanReviewMeta, ScannedLot } from '@/utils/ocr-utils';
 import { scanLandTitleImage } from '@/utils/ocr-utils';
 import {
   isLotExportable,
@@ -50,6 +50,14 @@ interface Corner {
   distance: string;
 }
 
+/** Multiple parcels from one scan (e.g. LOT DESCRIPTIONS table). */
+interface ImportedLotSlot {
+  id: string;
+  lotNo: string | null;
+  claimant: string | null;
+  corners: Corner[];
+}
+
 export default function LotPlotterScreen() {
   const insets = useSafeAreaInsets();
   const { colors } = useTheme();
@@ -71,8 +79,11 @@ export default function LotPlotterScreen() {
   const [scanModalVisible, setScanModalVisible] = useState(false);
   const [exportModalVisible, setExportModalVisible] = useState(false);
   const [scanReviewVisible, setScanReviewVisible] = useState(false);
-  const [reviewCorners, setReviewCorners] = useState<ParsedCorner[]>([]);
+  const [reviewLots, setReviewLots] = useState<ScannedLot[]>([]);
   const [reviewMeta, setReviewMeta] = useState<ScanReviewMeta | null>(null);
+  /** After a multi-lot scan: switch parcel without re-uploading. */
+  const [importedLots, setImportedLots] = useState<ImportedLotSlot[] | null>(null);
+  const [activeImportedLotIndex, setActiveImportedLotIndex] = useState(0);
   const [pendingScanLabel, setPendingScanLabel] = useState<string | null>(null);
   const [isOcrProcessing, setIsOcrProcessing] = useState(false);
   /** Monument / BLLM text extracted from the last successful AI scan (for cross-check with map tie point). */
@@ -294,6 +305,8 @@ export default function LotPlotterScreen() {
         try {
           const parsed = await parseLotCsv(fileAsset.uri, (fileAsset as any).file);
           if (parsed.length > 0) {
+            setImportedLots(null);
+            setActiveImportedLotIndex(0);
             setDocumentTieFromScan(null);
             setAutoTieMatchHint(null);
             const newCorners = parsed.map((p, idx) => ({
@@ -320,21 +333,34 @@ export default function LotPlotterScreen() {
     }
   };
 
-  const applyReviewedCorners = (
-    extractedCorners: ParsedCorner[],
+  const slotsFromScannedLots = (scannedLots: ScannedLot[]): ImportedLotSlot[] => {
+    const ts = Date.now();
+    return scannedLots
+      .filter((l) => l.corners.length > 0)
+      .map((lot, i) => ({
+        id: `imported-${ts}-${i}`,
+        lotNo: lot.lotNo?.trim() ? lot.lotNo.trim() : null,
+        claimant: lot.claimant?.trim() ? lot.claimant.trim() : null,
+        corners: lot.corners.map((p, idx) => ({
+          id: `ocr-${ts}-${i}-${idx}`,
+          line: idx + 1,
+          ns: p.ns,
+          deg: p.deg,
+          min: p.min,
+          ew: p.ew,
+          distance: p.distance,
+        })),
+      }));
+  };
+
+  const applyReviewedLots = (
+    scannedLots: ScannedLot[],
     sourceFileLabel: string | null,
     tieFromDocument?: string | null
   ) => {
-    if (extractedCorners.length === 0) return;
-    const newCorners = extractedCorners.map((p, idx) => ({
-      id: `ocr-${Date.now()}-${idx}`,
-      line: idx + 1,
-      ns: p.ns,
-      deg: p.deg,
-      min: p.min,
-      ew: p.ew,
-      distance: p.distance,
-    }));
+    const slots = slotsFromScannedLots(scannedLots);
+    if (slots.length === 0) return;
+
     const t = tieFromDocument?.trim();
     setDocumentTieFromScan(t && t.length > 0 ? t : null);
 
@@ -368,26 +394,51 @@ export default function LotPlotterScreen() {
       );
     } else {
       pendingScanLocationRef.current = null;
-      setAutoTieMatchHint(null);
+      setAutoTieMatchHint(
+        slots.length > 1
+          ? `${slots.length} lots loaded — pick a lot below. Each lot’s line 1 is MON → corner 1.`
+          : null
+      );
     }
 
-    setCorners(newCorners);
-    generatePolygon(newCorners, matched ?? undefined);
+    setImportedLots(slots);
+    setActiveImportedLotIndex(0);
+    setCorners(slots[0].corners);
+    generatePolygon(slots[0].corners, matched ?? undefined);
     if (sourceFileLabel) {
       setCsvFile(sourceFileLabel);
     }
   };
 
+  const switchImportedLot = (index: number) => {
+    if (!importedLots || index < 0 || index >= importedLots.length || index === activeImportedLotIndex) {
+      return;
+    }
+    const updated = importedLots.map((s, i) =>
+      i === activeImportedLotIndex ? { ...s, corners: corners.map((c) => ({ ...c })) } : s
+    );
+    setImportedLots(updated);
+    setActiveImportedLotIndex(index);
+    setCorners(updated[index].corners.map((c) => ({ ...c })));
+    generatePolygon(updated[index].corners);
+  };
+
+  const importedLotChipLabel = (slot: ImportedLotSlot, index: number) => {
+    if (slot.lotNo) return `Lot ${slot.lotNo}`;
+    return `Lot ${index + 1}`;
+  };
+
   const processOcrImage = async (uri: string) => {
     setIsOcrProcessing(true);
     try {
-      const { corners: extractedCorners, meta } = await scanLandTitleImage(uri);
+      const { lots: extractedLots, meta } = await scanLandTitleImage(uri);
+      const nonEmpty = extractedLots.filter((l) => l.corners.length > 0);
 
-      if (extractedCorners.length > 0) {
+      if (nonEmpty.length > 0) {
         const uriParts = uri.split('/');
         const fileName = uriParts[uriParts.length - 1] || 'Scanned_Title.jpg';
         setPendingScanLabel(`OCR_Result_${fileName}`);
-        setReviewCorners(extractedCorners);
+        setReviewLots(nonEmpty);
         setReviewMeta(meta);
         const docTie = meta.tiePointReference?.trim();
         setReviewCatalogMatch(docTie ? findBestTiePointMatch(docTie) : null);
@@ -528,6 +579,8 @@ export default function LotPlotterScreen() {
     setCorners([]);
     setPolygon(null);
     setCsvFile(null);
+    setImportedLots(null);
+    setActiveImportedLotIndex(0);
     setDocumentTieFromScan(null);
     setAutoTieMatchHint(null);
     setReviewCatalogMatch(null);
@@ -743,6 +796,8 @@ export default function LotPlotterScreen() {
                         setCsvFile(null);
                         setCorners([]);
                         setPolygon(null);
+                        setImportedLots(null);
+                        setActiveImportedLotIndex(0);
                         setDocumentTieFromScan(null);
                         setAutoTieMatchHint(null);
                       }}
@@ -766,6 +821,38 @@ export default function LotPlotterScreen() {
           <View style={[styles.dataTableSectionHeader, { backgroundColor: colors.contentBg, borderBottomColor: colors.border }]}>
             <Text style={[styles.dataTableSectionHeaderText, { color: colors.text }]}>Tie Point to Corner 1</Text>
           </View>
+
+          {importedLots && importedLots.length > 1 ? (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.importedLotChipScroll}
+              contentContainerStyle={styles.importedLotChipRow}
+            >
+              {importedLots.map((slot, i) => (
+                <TouchableOpacity
+                  key={slot.id}
+                  style={[
+                    styles.importedLotChip,
+                    { borderColor: colors.border, backgroundColor: colors.contentBg },
+                    activeImportedLotIndex === i && { borderColor: colors.primary, borderWidth: 2 },
+                  ]}
+                  onPress={() => switchImportedLot(i)}
+                >
+                  <Text
+                    style={[
+                      styles.importedLotChipText,
+                      { color: colors.text },
+                      activeImportedLotIndex === i && { color: colors.primary, fontWeight: '800' },
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {importedLotChipLabel(slot, i)}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          ) : null}
 
           {/* Wrap table in horizontal scroll so it never squishes on small screens */}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ flexGrow: 1 }}>
@@ -1017,20 +1104,20 @@ export default function LotPlotterScreen() {
 
       <ScanReviewModal
         visible={scanReviewVisible}
-        corners={reviewCorners}
+        lots={reviewLots}
         meta={reviewMeta}
         catalogMatch={reviewCatalogMatch}
         onDismiss={() => {
           setScanReviewVisible(false);
-          setReviewCorners([]);
+          setReviewLots([]);
           setReviewMeta(null);
           setReviewCatalogMatch(null);
           setPendingScanLabel(null);
         }}
-        onApply={(finalCorners) => {
-          applyReviewedCorners(finalCorners, pendingScanLabel, reviewMeta?.tiePointReference);
+        onApply={(finalLots) => {
+          applyReviewedLots(finalLots, pendingScanLabel, reviewMeta?.tiePointReference);
           setScanReviewVisible(false);
-          setReviewCorners([]);
+          setReviewLots([]);
           setReviewMeta(null);
           setReviewCatalogMatch(null);
           setPendingScanLabel(null);
@@ -1505,6 +1592,28 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 13,
     fontWeight: 'bold',
+  },
+  importedLotChipScroll: {
+    maxHeight: 48,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(0,0,0,0.08)',
+  },
+  importedLotChipRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  importedLotChip: {
+    marginRight: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+    borderWidth: 1,
+  },
+  importedLotChipText: {
+    fontSize: 13,
+    maxWidth: 140,
   },
   dataTableSectionHeader: {
     paddingVertical: 10,

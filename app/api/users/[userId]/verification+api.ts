@@ -5,13 +5,13 @@ import { paramId, userIdSegmentFromRequestUrl } from '@/lib/api/route-params';
 import { publicUserToJson } from '@/lib/api/public-user';
 import { getPublicUserById, updateVerificationStatus } from '@/lib/repositories/users.repository';
 
-const STAFF_ALLOWED: VerificationStatus[] = ['verified', 'unverified'];
+const STAFF_ALLOWED: VerificationStatus[] = ['verified', 'unverified', 'rejected'];
 
 type Body = { verification_status?: unknown };
 
 /**
  * Assessor/admin sets identity verification after reviewing ID upload and profile.
- * Allowed values: `verified` (approve) or `unverified` (reject — citizen can re-upload).
+ * Allowed values: `verified` (approve), `rejected` (decline — citizen can re-upload), or `unverified` (reset).
  */
 export async function PATCH(req: Request, ctx: { params: Promise<{ userId: string }> | { userId: string } }) {
   if (!isDbConfigured()) {
@@ -41,7 +41,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ userId: strin
     return Response.json(
       {
         success: false,
-        message: 'verification_status must be "verified" or "unverified".',
+        message: 'verification_status must be "verified", "rejected", or "unverified".',
       },
       { status: 400 }
     );

@@ -6,17 +6,20 @@ import {
   Modal,
   Platform,
   ScrollView,
+  StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
+  useWindowDimensions,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { captureRef } from 'react-native-view-shot';
 import MapView from '@/components/gis/MapView';
 import ArcGISCompareMap from '@/components/gis/ArcGISCompareMap';
 
 export type MapModalHandle = {
-  /** PNG data URI of the map area (labels, polygon, compass), for PDF embed. */
+  /** PNG data URI of the map area (labels, polygon); PDFs also add the static compass asset in `lot-pdf-map`. */
   captureForPdf: () => Promise<string | null>;
 };
 
@@ -131,11 +134,22 @@ const MapModal = forwardRef<MapModalHandle, MapModalProps>(function MapModal(
     }),
     []
   );
+  const insets = useSafeAreaInsets();
+  const { width: windowWidth } = useWindowDimensions();
+  const compactMapHeader = windowWidth < 520;
+
   const [showSettings, setShowSettings] = useState(false);
   const [showArea, setShowArea] = useState(showAreaLabel);
   const [showDistance, setShowDistance] = useState(true);
   const [isCompareMode, setIsCompareMode] = useState(false);
   const [polyColor, setPolyColor] = useState(polygon?.color || COLORS.accent);
+
+  /** Below status bar / notch (`statusBarTranslucent` on Modal). */
+  const statusBarFallback = Platform.OS === 'android' ? (StatusBar.currentHeight ?? 0) : 0;
+  const topInset = Math.max(insets.top, statusBarFallback);
+  const headerPaddingTop = topInset + (Platform.OS === 'ios' ? 8 : 10);
+  const headerPaddingBottom = 10;
+  const settingsDropdownTop = headerPaddingTop + headerPaddingBottom + 36;
 
   const latestCenterRef = React.useRef(center);
   const latestZoomRef = React.useRef(zoom);
@@ -184,16 +198,34 @@ const MapModal = forwardRef<MapModalHandle, MapModalProps>(function MapModal(
       statusBarTranslucent
     >
       <View style={styles.container}>
-        <View style={styles.header}>
+        <View
+          style={[
+            styles.header,
+            {
+              paddingTop: headerPaddingTop,
+              paddingBottom: headerPaddingBottom,
+            },
+          ]}
+        >
           <View style={styles.headerLeft}>
             <TouchableOpacity onPress={() => setShowSettings(!showSettings)} style={styles.iconBtn}>
               <Ionicons name="menu" size={24} color={COLORS.text} />
             </TouchableOpacity>
-            <Text style={styles.headerTitle}>Lot Plot - GIS Map</Text>
-            
-            <TouchableOpacity onPress={() => setIsCompareMode(!isCompareMode)} style={styles.historicalBtn}>
-              <Ionicons name={isCompareMode ? "map" : "swap-horizontal"} size={16} color={COLORS.text} style={{ marginRight: 6 }} />
-              <Text style={styles.historicalBtnText}>{isCompareMode ? 'View Normal Map' : 'Historical Compare'}</Text>
+            <Text style={styles.headerTitle} numberOfLines={1}>
+              Lot Plot - GIS Map
+            </Text>
+
+            <TouchableOpacity
+              onPress={() => setIsCompareMode(!isCompareMode)}
+              style={[styles.historicalBtn, compactMapHeader && styles.historicalBtnCompact]}
+              accessibilityLabel={isCompareMode ? 'View normal map' : 'Historical compare'}
+            >
+              <Ionicons name={isCompareMode ? 'map' : 'swap-horizontal'} size={18} color={COLORS.text} />
+              {!compactMapHeader ? (
+                <Text style={[styles.historicalBtnText, { marginLeft: 6 }]}>
+                  {isCompareMode ? 'View Normal Map' : 'Historical Compare'}
+                </Text>
+              ) : null}
             </TouchableOpacity>
           </View>
           <View style={styles.headerRight}>
@@ -214,7 +246,7 @@ const MapModal = forwardRef<MapModalHandle, MapModalProps>(function MapModal(
         </View>
 
         {showSettings && (
-          <View style={styles.settingsDropdown}>
+          <View style={[styles.settingsDropdown, { top: settingsDropdownTop }]}>
             <Text style={styles.settingsTitle}>Map Settings</Text>
             
             <TouchableOpacity style={styles.settingRow} onPress={() => setShowArea(!showArea)}>
@@ -297,25 +329,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     backgroundColor: COLORS.accent,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    paddingTop: Platform.OS === 'ios' ? 40 : 6,
-    height: Platform.OS === 'ios' ? 70 : 40,
+    paddingHorizontal: 10,
   },
   headerLeft: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
+    minWidth: 0,
+    marginRight: 8,
   },
   iconBtn: {
     padding: 4,
     marginRight: 8,
   },
   headerTitle: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: 'bold',
     color: COLORS.text,
-    marginLeft: 8,
-    marginRight: 16,
+    marginLeft: 6,
+    marginRight: 8,
+    flexShrink: 1,
   },
   historicalBtn: {
     flexDirection: 'row',
@@ -324,6 +357,10 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     paddingHorizontal: 12,
     borderRadius: 6,
+    flexShrink: 0,
+  },
+  historicalBtnCompact: {
+    paddingHorizontal: 10,
   },
   historicalBtnText: {
     color: COLORS.text,
@@ -334,6 +371,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
+    flexShrink: 0,
   },
   exportPdfBtn: {
     padding: 6,
@@ -351,7 +389,6 @@ const styles = StyleSheet.create({
   },
   settingsDropdown: {
     position: 'absolute',
-    top: Platform.OS === 'ios' ? 70 : 40,
     left: 12,
     width: 280,
     backgroundColor: '#ffffff',

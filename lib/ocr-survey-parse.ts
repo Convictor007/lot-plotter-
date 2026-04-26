@@ -202,6 +202,78 @@ export function normalizeOllamaCornersPayload(payload: unknown): ParsedCornerRow
   return out.map((c, i) => ({ ...c, line: i + 1 }));
 }
 
+function tryLotField(v: unknown): string | null {
+  if (v == null) return null;
+  if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+  const s = String(v).trim();
+  if (!s || /^null$/i.test(s)) return null;
+  return s.length > 120 ? s.slice(0, 120) : s;
+}
+
+export type NormalizedScannedLot = {
+  lotNo: string | null;
+  claimant: string | null;
+  corners: ParsedCornerRow[];
+};
+
+/**
+ * Prefer **lots**[] for multi-row "LOT DESCRIPTIONS" tables; else single **corners** at root.
+ * Each lot's **corners[0]** = monument → corner 1 for that lot.
+ */
+export function normalizeOllamaLotsPayload(payload: unknown): {
+  tiePointReference: string | null;
+  lots: NormalizedScannedLot[];
+} {
+  const tiePointReference = extractTiePointReferenceFromLlmPayload(payload);
+  if (!payload || typeof payload !== 'object') {
+    return { tiePointReference, lots: [] };
+  }
+  const o = payload as Record<string, unknown>;
+  const lotsRaw = o.lots;
+  if (Array.isArray(lotsRaw) && lotsRaw.length > 0) {
+    const lots: NormalizedScannedLot[] = [];
+    for (const item of lotsRaw) {
+      if (!item || typeof item !== 'object') continue;
+      const L = item as Record<string, unknown>;
+      const cornersArr = L.corners;
+      if (!Array.isArray(cornersArr)) continue;
+      const corners: ParsedCornerRow[] = [];
+      let line = 1;
+      for (const row of cornersArr) {
+        if (!row || typeof row !== 'object') continue;
+        const r = row as Record<string, unknown>;
+        const v = toValidatedCorner(r.ns, r.deg, r.min, r.ew, r.distance, line++);
+        if (v) corners.push(v);
+      }
+      const fixedCorners = corners.map((c, i) => ({ ...c, line: i + 1 }));
+      if (fixedCorners.length === 0) continue;
+      const lotNo =
+        tryLotField(L.lotNo) ??
+        tryLotField(L.lot_no) ??
+        tryLotField(L['LOT NO']) ??
+        tryLotField(L['LOT NO.']);
+      const claimant =
+        tryLotField(L.claimant) ??
+        tryLotField(L.CLAIMANT) ??
+        tryLotField(L.claimantName) ??
+        null;
+      lots.push({ lotNo, claimant, corners: fixedCorners });
+    }
+    if (lots.length > 0) {
+      return { tiePointReference, lots };
+    }
+  }
+
+  const singleCorners = normalizeOllamaCornersPayload(payload);
+  if (singleCorners.length === 0) {
+    return { tiePointReference, lots: [] };
+  }
+  return {
+    tiePointReference,
+    lots: [{ lotNo: null, claimant: null, corners: singleCorners }],
+  };
+}
+
 /**
  * Try to match one survey line. Order: strict CSV-like, then spaced DMS.
  */

@@ -13,10 +13,9 @@ import {
   Pressable,
   Modal,
   ActivityIndicator,
-  StatusBar,
 } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ScreenSafeArea } from '@/components/ScreenSafeArea';
+import { useSafeAreaInsets, type Edge } from 'react-native-safe-area-context';
+import { DEFAULT_SCREEN_SAFE_AREA_EDGES, ScreenSafeArea } from '@/components/ScreenSafeArea';
 import Animated, { useAnimatedStyle, withTiming } from 'react-native-reanimated';
 import type { PublicUserJson } from '@/database/models';
 import { MOCK_LOGIN_EMAIL } from '@/constants/mockAuth';
@@ -144,16 +143,8 @@ function MainLayout() {
   const pathname = usePathname();
   const router = useRouter();
   const safeInsets = useSafeAreaInsets();
-
-  /** Absolute drawer ignores parent SafeAreaView padding on some Android builds — pad explicitly. */
-  const drawerSafePadding = useMemo(() => {
-    if (!isSmallScreen) return undefined;
-    const androidStatus = Platform.OS === 'android' ? (StatusBar.currentHeight ?? 0) : 0;
-    return {
-      paddingTop: Math.max(safeInsets.top, androidStatus),
-      paddingBottom: safeInsets.bottom,
-    };
-  }, [isSmallScreen, safeInsets.top, safeInsets.bottom]);
+  /** Phone drawer should be full viewport height; we apply top/bottom insets on the sidebar + main column only. */
+  const shellEdges: readonly Edge[] = isSmallScreen ? ['left', 'right'] : DEFAULT_SCREEN_SAFE_AREA_EDGES;
 
   const [sessionUser, setSessionUser] = useState<PublicUserJson | null>(null);
   const [sessionToken, setSessionToken] = useState<string | null>(null);
@@ -270,14 +261,17 @@ function MainLayout() {
   const newRequestHeader = useNewRequest();
 
   return (
-    <ScreenSafeArea style={[styles.container, { backgroundColor: colors.contentBg }]} edges={['top', 'right', 'bottom', 'left']}>
+    <ScreenSafeArea style={[styles.container, { backgroundColor: colors.contentBg }]} edges={shellEdges}>
       {/* Sidebar */}
       <Animated.View
         style={[
           styles.sidebar,
           { backgroundColor: colors.sidebarBg },
           isSmallScreen && styles.sidebarAbsolute,
-          drawerSafePadding,
+          isSmallScreen && {
+            paddingTop: safeInsets.top,
+            paddingBottom: safeInsets.bottom,
+          },
           sidebarAnimatedStyle,
         ]}
       >
@@ -287,6 +281,7 @@ function MainLayout() {
             isCollapsed && styles.sidebarHeaderCollapsed,
             !isCollapsed && { justifyContent: isSmallScreen ? 'space-between' : 'center' },
             compactPhoneChrome && styles.sidebarHeaderCompact,
+            isSmallScreen && !isCollapsed && styles.sidebarHeaderPhone,
           ]}
         >
           {!isCollapsed ? (
@@ -307,7 +302,12 @@ function MainLayout() {
             <Image source={IASSESS_LOGO} style={styles.logoImageCollapsed} resizeMode="cover" />
           )}
           {isSmallScreen && (
-            <TouchableOpacity onPress={toggleSidebar}>
+            <TouchableOpacity
+              onPress={toggleSidebar}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              style={styles.sidebarCloseBtn}
+              accessibilityLabel="Close menu"
+            >
               <Ionicons name="close" size={24} color={colors.sidebarText} />
             </TouchableOpacity>
           )}
@@ -327,7 +327,13 @@ function MainLayout() {
           ))}
         </View>
 
-        <View style={[styles.userProfileSection, isCollapsed && !isSmallScreen && styles.userProfileSectionCollapsed]}>
+        <View
+          style={[
+            styles.userProfileSection,
+            isCollapsed && !isSmallScreen && styles.userProfileSectionCollapsed,
+            isSmallScreen && styles.userProfileSectionPhone,
+          ]}
+        >
           <View style={[styles.userProfileTopRow, isCollapsed && !isSmallScreen && styles.userProfileTopRowCollapsed]}>
             <View
               style={[
@@ -365,7 +371,12 @@ function MainLayout() {
             )}
           </View>
           <TouchableOpacity
-            style={[styles.logoutButton, { backgroundColor: colors.activeBg }, isCollapsed && !isSmallScreen && styles.logoutButtonCollapsed]}
+            style={[
+              styles.logoutButton,
+              { backgroundColor: colors.activeBg },
+              isSmallScreen && styles.logoutButtonPhone,
+              isCollapsed && !isSmallScreen && styles.logoutButtonCollapsed,
+            ]}
             onPress={() => setLogoutModalVisible(true)}
             activeOpacity={0.85}
             accessibilityRole="button"
@@ -378,7 +389,15 @@ function MainLayout() {
       </Animated.View>
 
       {/* Main Content */}
-      <View style={styles.mainContent}>
+      <View
+        style={[
+          styles.mainContent,
+          isSmallScreen && {
+            paddingTop: safeInsets.top,
+            paddingBottom: safeInsets.bottom,
+          },
+        ]}
+      >
         {/* Header */}
         <View
           style={[
@@ -580,6 +599,16 @@ const styles = StyleSheet.create({
     minHeight: 88,
     paddingVertical: 10,
   },
+  /** Drawer header on phone: balanced horizontal padding so the close control isn’t flush to the edge. */
+  sidebarHeaderPhone: {
+    paddingLeft: 16,
+    paddingRight: 14,
+    paddingVertical: 14,
+  },
+  sidebarCloseBtn: {
+    padding: 4,
+    marginRight: -2,
+  },
   sidebarHeaderCollapsed: {
     justifyContent: 'center',
     padding: 0,
@@ -623,6 +652,7 @@ const styles = StyleSheet.create({
   },
   menuContainer: {
     flex: 1,
+    minHeight: 0,
     paddingVertical: 15,
   },
   menuItem: {
@@ -697,6 +727,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     alignItems: 'center',
   },
+  /** Match nav row horizontal inset (menu uses marginHorizontal 8 + item padding). */
+  userProfileSectionPhone: {
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 16,
+  },
   userProfileTopRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -744,6 +780,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.15)',
   },
+  logoutButtonPhone: {
+    alignSelf: 'stretch',
+    marginHorizontal: 8,
+  },
   logoutButtonCollapsed: {
     marginTop: 12,
     paddingHorizontal: 0,
@@ -758,6 +798,7 @@ const styles = StyleSheet.create({
   },
   mainContent: {
     flex: 1,
+    minWidth: 0,
     flexDirection: 'column',
   },
   header: {

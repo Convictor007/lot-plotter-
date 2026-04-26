@@ -33,7 +33,8 @@ export type GeocodedAddressPreview = {
   formatted?: string | null;
 };
 
-function buildMapHtml(lat: number, lng: number) {
+function buildMapHtml(lat: number, lng: number, pinColor: string) {
+  const pin = pinColor && /^#[0-9A-Fa-f]{6}$/.test(pinColor) ? pinColor : '#3b5998';
   return `<!DOCTYPE html><html><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
@@ -48,14 +49,14 @@ function buildMapHtml(lat: number, lng: number) {
     display:flex;flex-direction:column;align-items:center;margin-top:-6px;
   }
   .addr-tooltip{
-    position:relative;background:#e53935;color:#fff;font-size:12px;font-weight:600;
+    position:relative;background:${pin};color:#fff;font-size:12px;font-weight:600;
     padding:8px 14px;border-radius:10px;margin-bottom:4px;max-width:min(280px,calc(100vw - 48px));
     text-align:center;line-height:1.35;box-shadow:0 2px 10px rgba(0,0,0,.22);
     font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   }
   .addr-tooltip::after{
     content:'';position:absolute;left:50%;bottom:-7px;transform:translateX(-50%);
-    border-width:7px 7px 0 7px;border-style:solid;border-color:#e53935 transparent transparent transparent;
+    border-width:7px 7px 0 7px;border-style:solid;border-color:${pin} transparent transparent transparent;
   }
   .center-pin svg{display:block;width:40px;height:48px;filter:drop-shadow(0 2px 4px rgba(0,0,0,.35));}
   #basemap-bar{
@@ -80,7 +81,7 @@ function buildMapHtml(lat: number, lng: number) {
 <div class="pin-stack" aria-hidden="true">
   <div class="addr-tooltip">Your address is here</div>
   <div class="center-pin">
-    <svg viewBox="0 0 24 36" xmlns="http://www.w3.org/2000/svg"><path fill="#e74c3c" d="M12 0C7.58 0 4 3.58 4 8c0 7 8 18 8 18s8-11 8-18c0-4.42-3.58-8-8-8z"/><circle fill="#fff" cx="12" cy="8" r="3.2"/></svg>
+    <svg viewBox="0 0 24 36" xmlns="http://www.w3.org/2000/svg"><path fill="${pin}" d="M12 0C7.58 0 4 3.58 4 8c0 7 8 18 8 18s8-11 8-18c0-4.42-3.58-8-8-8z"/><circle fill="#fff" cx="12" cy="8" r="3.2"/></svg>
   </div>
 </div>
 <div id="basemap-bar" aria-label="Map style"></div>
@@ -259,7 +260,7 @@ export function AddressMapPickerModal({
     }
   }, [visible, startLat, startLng]);
 
-  const html = useMemo(() => buildMapHtml(startLat, startLng), [startLat, startLng]);
+  const html = useMemo(() => buildMapHtml(startLat, startLng, colors.primary), [startLat, startLng, colors.primary]);
 
   const onMessage = useCallback((e: { nativeEvent: { data: string } }) => {
     applyPinPayload(e.nativeEvent.data, setDraftLat, setDraftLng);
@@ -432,19 +433,24 @@ export function AddressMapPickerModal({
             </Pressable>
           </View>
 
-          <TouchableOpacity
+          <View
             style={[
-              styles.confirmBtn,
+              styles.confirmBtnBar,
               {
-                backgroundColor: colors.primary,
-                paddingBottom: Math.max(14, insets.bottom + 10),
+                backgroundColor: colors.contentBg,
+                borderTopColor: colors.border,
+                paddingBottom: Math.max(8, insets.bottom + 6),
               },
             ]}
-            onPress={handleConfirm}
-            activeOpacity={0.9}
           >
-            <Text style={styles.confirmBtnText}>Confirm</Text>
-          </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.confirmBtn, { backgroundColor: colors.primary }]}
+              onPress={handleConfirm}
+              activeOpacity={0.9}
+            >
+              <Text style={styles.confirmBtnText}>Confirm</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       </View>
     </Modal>
@@ -542,11 +548,19 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.15,
     shadowRadius: 4,
   },
-  confirmBtn: {
-    paddingTop: 16,
-    alignItems: 'center',
-    width: '100%',
-    borderRadius: 0,
+  confirmBtnBar: {
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
   },
-  confirmBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  confirmBtn: {
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 12,
+    maxWidth: 480,
+    width: '100%',
+    alignSelf: 'center',
+  },
+  confirmBtnText: { color: '#fff', fontSize: 16, fontWeight: '700', lineHeight: 20 },
 });
