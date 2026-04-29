@@ -18,7 +18,6 @@ import { useSafeAreaInsets, type Edge } from 'react-native-safe-area-context';
 import { DEFAULT_SCREEN_SAFE_AREA_EDGES, ScreenSafeArea } from '@/components/ScreenSafeArea';
 import Animated, { useAnimatedStyle, withTiming } from 'react-native-reanimated';
 import type { PublicUserJson } from '@/database/models';
-import { MOCK_LOGIN_EMAIL } from '@/constants/mockAuth';
 import { useAuthenticatedImageDataUri } from '@/hooks/useAuthenticatedImageDataUri';
 import { apiUrl } from '@/lib/api/api-url';
 import { clearAuthSession, getAuthToken } from '@/lib/authSession';
@@ -186,12 +185,12 @@ function MainLayout() {
 
   const sidebarDisplayName = sessionUser
     ? `${sessionUser.first_name} ${sessionUser.last_name}`.trim() || sessionUser.email.split('@')[0]
-    : MOCK_LOGIN_EMAIL.split('@')[0];
-  const sidebarDisplayEmail = sessionUser?.email ?? MOCK_LOGIN_EMAIL;
+    : 'Guest';
+  const sidebarDisplayEmail = sessionUser?.email ?? '';
   const sidebarInitials =
     sessionUser?.first_name && sessionUser?.last_name
       ? `${sessionUser.first_name.charAt(0)}${sessionUser.last_name.charAt(0)}`.toUpperCase()
-      : (sessionUser?.email ?? MOCK_LOGIN_EMAIL).slice(0, 2).toUpperCase();
+      : (sessionUser?.email ?? 'GU').slice(0, 2).toUpperCase();
 
   // Auto-close or collapse based on screen size
   useEffect(() => {

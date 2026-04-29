@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   View, 
   Text, 
@@ -17,6 +17,7 @@ import { useTheme } from '@/contexts/ThemeContext';
 import { useNewRequest } from '@/contexts/NewRequestContext';
 import { apiUrl } from '@/lib/api/api-url';
 import { getAuthToken } from '@/lib/authSession';
+import { AddressMapPickerModal, type GeocodedAddressPreview } from '@/components/profile/AddressMapPickerModal';
 
 // Constants based on the extracted documents
 const ASSESSMENT_TRANSACTIONS = [
@@ -89,24 +90,98 @@ export default function NewRequestScreen() {
   const [formData, setFormData] = useState({
     applicantName: '',
     pin: '', // Property Index Number
+    streetName: '',
     location: '',
+    barangay: '',
     notes: ''
   });
   
   // Store uploaded files per requirement index
   const [uploadedDocs, setUploadedDocs] = useState<Record<number, DocumentPicker.DocumentPickerAsset>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showAddressPicker, setShowAddressPicker] = useState(false);
+  const [mapLat, setMapLat] = useState<number | null>(null);
+  const [mapLng, setMapLng] = useState<number | null>(null);
+  const [taxDecInput, setTaxDecInput] = useState('');
+  const [taxDeclarations, setTaxDeclarations] = useState<string[]>([]);
+  const formInputBg = colors.contentBg;
+  const formInputBorder = colors.border;
+  const formInputText = colors.text;
+  const formPlaceholder = colors.textMuted;
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = await getAuthToken();
+        if (!token) return;
+        const res = await fetch(apiUrl('/api/users/me'), {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const json = (await res.json()) as {
+          success?: boolean;
+          user?: {
+            first_name?: string;
+            last_name?: string;
+            barangay?: string | null;
+            municipality?: string | null;
+          };
+        };
+        if (cancelled || !res.ok || !json.success || !json.user) return;
+        const first = (json.user.first_name || '').trim();
+        const last = (json.user.last_name || '').trim();
+        const applicant = [first, last].filter(Boolean).join(' ');
+        const barangay = (json.user.barangay || '').trim();
+        const municipality = (json.user.municipality || '').trim();
+
+        setFormData((prev) => ({
+          ...prev,
+          applicantName: prev.applicantName.trim() ? prev.applicantName : applicant,
+          streetName: prev.streetName.trim() ? prev.streetName : ((json.user as any).street_address || '').trim(),
+          barangay: prev.barangay.trim() ? prev.barangay : barangay,
+          location: prev.location.trim() ? prev.location : municipality,
+        }));
+      } catch {
+        //
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleNext = () => {
     if (step === 1 && !selectedType) {
       Alert.alert('Error', 'Please select a transaction type first.');
       return;
     }
-    if (step === 2 && (!formData.applicantName || !formData.pin)) {
-      Alert.alert('Error', 'Applicant name and PIN are required.');
+    if (step === 2 && (!formData.applicantName || taxDeclarations.length === 0)) {
+      Alert.alert('Error', "Owner's name and at least one Tax Declaration Number are required.");
       return;
     }
     setStep(prev => prev + 1);
+  };
+
+  const addTaxDeclaration = () => {
+    const value = taxDecInput.trim();
+    if (!value) {
+      Alert.alert('Missing value', 'Enter a tax declaration number first.');
+      return;
+    }
+    if (taxDeclarations.includes(value)) {
+      Alert.alert('Duplicate', 'This tax declaration number is already in the list.');
+      return;
+    }
+    const next = [...taxDeclarations, value];
+    setTaxDeclarations(next);
+    setTaxDecInput('');
+    setFormData((prev) => ({ ...prev, pin: next[0] || prev.pin }));
+  };
+
+  const removeTaxDeclaration = (idx: number) => {
+    const next = taxDeclarations.filter((_, i) => i !== idx);
+    setTaxDeclarations(next);
+    setFormData((prev) => ({ ...prev, pin: next[0] || '' }));
   };
 
   const handleBack = () => {
@@ -144,13 +219,15 @@ export default function NewRequestScreen() {
     
     // Construct the payload mapping to the TransactionRequest interface
     const payload = {
-      userId: 'current-user-id', // Placeholder for authenticated user ID
       type: selectedType,
-      propertyId: formData.pin, // Using PIN as identifier for now
-      status: 'submitted',
-      notes: formData.notes,
+      propertyId: taxDeclarations[0] || formData.pin,
+      status: 'pending',
+      notes: JSON.stringify({
+        remarks: formData.notes || null,
+        taxDeclarations,
+      }),
       applicantName: formData.applicantName,
-      location: formData.location,
+      location: [formData.streetName.trim(), formData.barangay.trim(), formData.location.trim()].filter(Boolean).join(', '),
       // Pass metadata about uploaded docs to the API
       documentsVerified: Object.keys(uploadedDocs).reduce((acc: any, key) => {
         acc[key] = {
@@ -192,6 +269,48 @@ export default function NewRequestScreen() {
       Alert.alert('Error', error.message || 'Failed to submit request.');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const applyGeocodedAddress = (addr: GeocodedAddressPreview | null | undefined) => {
+    if (!addr) return;
+    const streetFallback =
+      (addr.formatted || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)[0] || '';
+    setFormData((prev) => ({
+      ...prev,
+      streetName: (addr.street || '').trim() || streetFallback || prev.streetName,
+      barangay: (addr.barangay || '').trim() || prev.barangay,
+      location: (addr.municipality || '').trim() || prev.location,
+    }));
+  };
+
+  const resolveAndApplyAddress = async (
+    lat: number,
+    lng: number,
+    preview: GeocodedAddressPreview | null
+  ) => {
+    setMapLat(lat);
+    setMapLng(lng);
+    if (preview?.municipality || preview?.barangay || preview?.street) {
+      applyGeocodedAddress(preview);
+      return;
+    }
+    try {
+      const res = await fetch(
+        apiUrl(`/api/geocode/reverse?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`)
+      );
+      const json = (await res.json()) as {
+        success?: boolean;
+        address?: GeocodedAddressPreview;
+      };
+      if (res.ok && json.success && json.address) {
+        applyGeocodedAddress(json.address);
+      }
+    } catch {
+      //
     }
   };
 
@@ -250,52 +369,111 @@ export default function NewRequestScreen() {
 
   const renderStep2 = () => (
     <View style={[styles.stepContent, { backgroundColor: colors.cardBg, borderColor: colors.border, borderWidth: 1 }]}>
-      <Text style={[styles.sectionTitle, { color: colors.text }]}>2. Property & Applicant Details</Text>
-      
-      <View style={styles.inputGroup}>
-        <Text style={[styles.inputLabel, { color: colors.text }]}>Applicant Name *</Text>
-        <TextInput 
-          style={[styles.input, { backgroundColor: colors.contentBg, color: colors.text, borderColor: colors.border }]} 
-          placeholder="Enter full name or claimant" 
-          placeholderTextColor={colors.textMuted}
-          value={formData.applicantName}
-          onChangeText={(text) => setFormData({...formData, applicantName: text})}
-        />
-      </View>
+      <Text style={[styles.sectionTitle, styles.formCenterTitle, { color: colors.text }]}>PROPERTY INFORMATION</Text>
 
-      <View style={styles.inputGroup}>
-        <Text style={[styles.inputLabel, { color: colors.text }]}>Property Index Number (PIN) *</Text>
-        <TextInput 
-          style={[styles.input, { backgroundColor: colors.contentBg, color: colors.text, borderColor: colors.border }]} 
-          placeholder="e.g. 000-00-000-00-000" 
-          placeholderTextColor={colors.textMuted}
-          value={formData.pin}
-          onChangeText={(text) => setFormData({...formData, pin: text})}
-        />
-      </View>
+      <View style={[styles.propertyFormShell, { borderColor: colors.border, backgroundColor: colors.contentBg }]}>
+        <View style={styles.inputGroup}>
+          <Text style={[styles.formMicroLabel, { color: colors.textMuted }]}>Required Field</Text>
+          <Text style={[styles.inputLabel, { color: colors.text }]}>Owner's Name *</Text>
+          <TextInput
+            style={[styles.input, styles.slimInput, { backgroundColor: formInputBg, color: formInputText, borderColor: formInputBorder }]}
+            placeholder="Owner's Name"
+            placeholderTextColor={formPlaceholder}
+            value={formData.applicantName}
+            onChangeText={(text) => setFormData({ ...formData, applicantName: text })}
+          />
+        </View>
 
-      <View style={styles.inputGroup}>
-        <Text style={[styles.inputLabel, { color: colors.text }]}>Property Location (Barangay/Municipality)</Text>
-        <TextInput 
-          style={[styles.input, { backgroundColor: colors.contentBg, color: colors.text, borderColor: colors.border }]} 
-          placeholder="Enter complete location" 
-          placeholderTextColor={colors.textMuted}
-          value={formData.location}
-          onChangeText={(text) => setFormData({...formData, location: text})}
-        />
-      </View>
-      
-      <View style={styles.inputGroup}>
-        <Text style={[styles.inputLabel, { color: colors.text }]}>Additional Notes (Optional)</Text>
-        <TextInput 
-          style={[styles.input, styles.textArea, { backgroundColor: colors.contentBg, color: colors.text, borderColor: colors.border }]} 
-          placeholder="Any specific details for this request" 
-          placeholderTextColor={colors.textMuted}
-          multiline 
-          numberOfLines={4}
-          value={formData.notes}
-          onChangeText={(text) => setFormData({...formData, notes: text})}
-        />
+        <View style={styles.inputGroup}>
+          <Text style={[styles.inputLabel, { color: colors.text }]}>Tax Declaration Number *</Text>
+          <View style={styles.taxDecRow}>
+            <TextInput
+              style={[styles.input, styles.slimInput, styles.taxDecInput, { backgroundColor: formInputBg, color: formInputText, borderColor: formInputBorder }]}
+              placeholder="Tax Declaration Number"
+              placeholderTextColor={formPlaceholder}
+              value={taxDecInput}
+              onChangeText={setTaxDecInput}
+            />
+            <TouchableOpacity style={styles.taxDecActionBtn} activeOpacity={0.85} onPress={addTaxDeclaration}>
+              <Text style={styles.taxDecActionBtnText}>Add Tax Dec</Text>
+            </TouchableOpacity>
+          </View>
+          {taxDeclarations.length > 0 ? (
+            <View style={[styles.taxDecTable, { borderColor: colors.border }]}>
+              <View style={styles.taxDecTableHeader}>
+                <Text style={[styles.taxDecTableHeaderTxt, styles.taxDecNumCol]}>#</Text>
+                <Text style={[styles.taxDecTableHeaderTxt, styles.taxDecValCol]}>Tax Declaration No.</Text>
+                <Text style={[styles.taxDecTableHeaderTxt, styles.taxDecActionCol]}>Action</Text>
+              </View>
+              {taxDeclarations.map((td, idx) => (
+                <View key={`${td}-${idx}`} style={[styles.taxDecTableRow, { borderTopColor: colors.border, backgroundColor: formInputBg }]}>
+                  <Text style={[styles.taxDecCellTxt, styles.taxDecNumCol, { color: colors.text }]}>{idx + 1}.</Text>
+                  <Text style={[styles.taxDecCellTxt, styles.taxDecValCol, { color: colors.text }]} numberOfLines={1}>{td}</Text>
+                  <View style={styles.taxDecActionCol}>
+                    <TouchableOpacity style={styles.taxDecRemoveBtn} onPress={() => removeTaxDeclaration(idx)}>
+                      <Text style={styles.taxDecRemoveBtnText}>Remove</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))}
+            </View>
+          ) : null}
+          <TouchableOpacity style={styles.mapPickBtn} onPress={() => setShowAddressPicker(true)} activeOpacity={0.85}>
+            <Ionicons name="map-outline" size={16} color="#fff" />
+            <Text style={styles.mapPickBtnText}>Pick Address from Map</Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.grid3}>
+          <TextInput
+            style={[styles.input, styles.slimInput, styles.gridInput, { backgroundColor: formInputBg, color: formInputText, borderColor: formInputBorder }]}
+            placeholder="Unit No."
+            placeholderTextColor={formPlaceholder}
+          />
+          <TextInput
+            style={[styles.input, styles.slimInput, styles.gridInput, { backgroundColor: formInputBg, color: formInputText, borderColor: formInputBorder }]}
+            placeholder="Lot No."
+            placeholderTextColor={formPlaceholder}
+          />
+          <TextInput
+            style={[styles.input, styles.slimInput, styles.gridInput, { backgroundColor: formInputBg, color: formInputText, borderColor: formInputBorder }]}
+            placeholder="Block No."
+            placeholderTextColor={formPlaceholder}
+          />
+        </View>
+
+        <View style={styles.inputGroup}>
+          <TextInput
+            style={[styles.input, styles.slimInput, { backgroundColor: formInputBg, color: formInputText, borderColor: formInputBorder }]}
+            placeholder="Street Name"
+            placeholderTextColor={formPlaceholder}
+            value={formData.streetName}
+            onChangeText={(text) => setFormData({ ...formData, streetName: text })}
+          />
+        </View>
+
+        <View style={styles.inputGroup}>
+          <Text style={[styles.inputLabel, { color: colors.text }]}>Location *</Text>
+          <TextInput
+            style={[styles.input, styles.slimInput, { backgroundColor: formInputBg, color: formInputText, borderColor: formInputBorder }]}
+            placeholder="Municipality"
+            placeholderTextColor={formPlaceholder}
+            value={formData.location}
+            onChangeText={(text) => setFormData({ ...formData, location: text })}
+          />
+        </View>
+
+        <View style={styles.inputGroup}>
+          <Text style={[styles.inputLabel, { color: colors.text }]}>Barangay *</Text>
+          <TextInput
+            style={[styles.input, styles.slimInput, { backgroundColor: formInputBg, color: formInputText, borderColor: formInputBorder }]}
+            placeholder="Please Select Barangay"
+            placeholderTextColor={formPlaceholder}
+            value={formData.barangay}
+            onChangeText={(text) => setFormData({ ...formData, barangay: text })}
+          />
+        </View>
+
       </View>
     </View>
   );
@@ -316,27 +494,31 @@ export default function NewRequestScreen() {
             const file = uploadedDocs[index];
             return (
               <View key={index} style={[styles.uploadItem, { borderBottomColor: colors.border }]}>
-                <Text style={[styles.uploadItemText, { color: colors.text }]}>{req}</Text>
-                
-                {file ? (
-                  <View style={[styles.fileAttachedContainer, { backgroundColor: colors.contentBg, borderColor: colors.border }]}>
-                    <Ionicons name="document-text" size={20} color="#3b5998" />
-                    <Text style={[styles.fileName, { color: colors.text }]} numberOfLines={1} ellipsizeMode="middle">
-                      {file.name}
-                    </Text>
-                    <TouchableOpacity onPress={() => removeDocument(index)} style={styles.removeBtn}>
-                      <Ionicons name="close-circle" size={20} color="#e74c3c" />
-                    </TouchableOpacity>
+                <View style={styles.reqLeft}>
+                  <View style={[styles.reqIndexBadge, { backgroundColor: colors.contentBg, borderColor: colors.border }]}>
+                    <Text style={[styles.reqIndexText, { color: colors.text }]}>{index + 1}</Text>
                   </View>
-                ) : (
-                  <TouchableOpacity 
-                    style={styles.uploadBtn}
-                    onPress={() => pickDocument(index)}
-                  >
-                    <Ionicons name="cloud-upload-outline" size={18} color="#fff" />
-                    <Text style={styles.uploadBtnText}>Upload File</Text>
-                  </TouchableOpacity>
-                )}
+                  <Text style={[styles.uploadItemText, { color: colors.text }]}>{req}</Text>
+                </View>
+
+                <View style={styles.reqRight}>
+                  {file ? (
+                    <View style={[styles.fileAttachedContainer, { backgroundColor: colors.contentBg, borderColor: colors.border }]}>
+                      <Ionicons name="document-text" size={20} color="#3b5998" />
+                      <Text style={[styles.fileName, { color: colors.text }]} numberOfLines={1} ellipsizeMode="middle">
+                        {file.name}
+                      </Text>
+                      <TouchableOpacity onPress={() => removeDocument(index)} style={styles.removeBtn}>
+                        <Ionicons name="close-circle" size={20} color="#e74c3c" />
+                      </TouchableOpacity>
+                    </View>
+                  ) : (
+                    <TouchableOpacity style={styles.uploadBtn} onPress={() => pickDocument(index)}>
+                      <Ionicons name="cloud-upload-outline" size={18} color="#fff" />
+                      <Text style={styles.uploadBtnText}>Upload File</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
               </View>
             );
           })}
@@ -349,39 +531,86 @@ export default function NewRequestScreen() {
     const selectedTypeTitle = ALL_TRANSACTION_TYPES.find(t => t.id === selectedType)?.title;
     const reqsCount = REQUIREMENTS[selectedType!]?.length || 0;
     const checkedCount = Object.keys(uploadedDocs).length;
+    const reqs = REQUIREMENTS[selectedType!]?.slice() ?? [];
+    const missingCount = Math.max(0, reqsCount - checkedCount);
+    const allDocsComplete = reqsCount > 0 ? checkedCount >= reqsCount : true;
+    const progressPct = reqsCount > 0 ? Math.max(0, Math.min(1, checkedCount / reqsCount)) : 1;
+    const locationText = [formData.streetName, formData.barangay, formData.location].filter(Boolean).join(', ') || 'N/A';
 
     return (
       <View style={[styles.stepContent, { backgroundColor: colors.cardBg, borderColor: colors.border, borderWidth: 1 }]}>
         <Text style={[styles.sectionTitle, { color: colors.text }]}>4. Review & Submit</Text>
-        
-        <View style={[styles.summaryCard, { backgroundColor: colors.contentBg, borderColor: colors.border }]}>
-          <Text style={[styles.summaryTitle, { color: colors.text }]}>Transaction Information</Text>
-          <View style={styles.summaryRow}>
-            <Text style={styles.summaryLabel}>Type:</Text>
-            <Text style={[styles.summaryValue, { color: colors.text }]}>{selectedTypeTitle}</Text>
-          </View>
-          <View style={styles.summaryRow}>
-            <Text style={styles.summaryLabel}>Applicant:</Text>
-            <Text style={[styles.summaryValue, { color: colors.text }]}>{formData.applicantName}</Text>
-          </View>
-          <View style={styles.summaryRow}>
-            <Text style={styles.summaryLabel}>PIN:</Text>
-            <Text style={[styles.summaryValue, { color: colors.text }]}>{formData.pin}</Text>
-          </View>
-          <View style={styles.summaryRow}>
-            <Text style={styles.summaryLabel}>Location:</Text>
-            <Text style={[styles.summaryValue, { color: colors.text }]}>{formData.location || 'N/A'}</Text>
-          </View>
-          
-          <View style={[styles.summaryRow, { marginTop: 15, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 15 }]}>
-            <Text style={styles.summaryLabel}>Documents Uploaded:</Text>
-            <Text style={[styles.summaryValue, checkedCount < reqsCount ? { color: '#e74c3c' } : { color: '#2ecc71' }]}>
-              {checkedCount} of {reqsCount} files
+
+        <View style={[styles.reviewCard, { backgroundColor: colors.contentBg, borderColor: colors.border }]}>
+          <Text style={[styles.reviewCardTitle, { color: colors.text }]}>Transaction Information</Text>
+          <View style={styles.reviewRow}>
+            <Text style={[styles.reviewLabel, { color: colors.textMuted }]}>Type</Text>
+            <Text style={[styles.reviewValue, { color: colors.text }]} numberOfLines={2}>
+              {selectedTypeTitle || '—'}
             </Text>
           </View>
-          {checkedCount < reqsCount && (
+          <View style={styles.reviewRow}>
+            <Text style={[styles.reviewLabel, { color: colors.textMuted }]}>Applicant</Text>
+            <Text style={[styles.reviewValue, { color: colors.text }]} numberOfLines={2}>
+              {formData.applicantName || '—'}
+            </Text>
+          </View>
+          <View style={styles.reviewRow}>
+            <Text style={[styles.reviewLabel, { color: colors.textMuted }]}>Tax Declarations</Text>
+            <Text style={[styles.reviewValue, { color: colors.text }]} numberOfLines={2}>
+              {taxDeclarations.length > 0 ? taxDeclarations.join(', ') : '—'}
+            </Text>
+          </View>
+          <View style={[styles.reviewRow, { marginBottom: 0 }]}>
+            <Text style={[styles.reviewLabel, { color: colors.textMuted }]}>Location</Text>
+            <Text style={[styles.reviewValue, { color: colors.text }]} numberOfLines={3}>
+              {locationText}
+            </Text>
+          </View>
+        </View>
+
+        <View style={[styles.reviewCard, { backgroundColor: colors.contentBg, borderColor: colors.border }]}>
+          <View style={styles.docsHeaderRow}>
+            <Text style={[styles.reviewCardTitle, { color: colors.text, marginBottom: 0 }]}>Documentary Requirements</Text>
+            <View style={styles.docsHeaderMeta}>
+              <Text
+                style={[
+                  styles.docsCountText,
+                  { color: allDocsComplete ? '#2ecc71' : '#e74c3c' },
+                ]}
+              >
+                {checkedCount} / {reqsCount}
+              </Text>
+            </View>
+          </View>
+
+          <View style={[styles.docsProgressTrack, { backgroundColor: colors.border }]}>
+            <View style={[styles.docsProgressFill, { width: `${Math.round(progressPct * 100)}%`, backgroundColor: allDocsComplete ? '#2ecc71' : '#3b5998' }]} />
+          </View>
+
+          <View style={styles.docsList}>
+            {reqs.map((req, index) => {
+              const file = uploadedDocs[index];
+              const ok = Boolean(file);
+              return (
+                <View key={index} style={[styles.docsItemRow, { borderBottomColor: colors.border }]}>
+                  <View style={styles.docsItemLeft}>
+                    <Ionicons name={ok ? 'checkmark-circle' : 'ellipse-outline'} size={18} color={ok ? '#2ecc71' : colors.textMuted} />
+                    <Text style={[styles.docsReqText, { color: colors.text }]} numberOfLines={3}>
+                      {req}
+                    </Text>
+                  </View>
+                  <Text style={[styles.docsStatusText, { color: ok ? '#2ecc71' : '#e74c3c' }]}>
+                    {ok ? 'Uploaded' : 'Missing'}
+                  </Text>
+                </View>
+              );
+            })}
+          </View>
+
+          {!allDocsComplete && (
             <Text style={styles.warningText}>
-              Note: You have lacking documents. Application will only be processed upon submission of complete documents.
+              {missingCount} missing document{missingCount === 1 ? '' : 's'}. Please complete uploads before submitting.
             </Text>
           )}
         </View>
@@ -412,7 +641,14 @@ export default function NewRequestScreen() {
             <Text style={styles.buttonPrimaryText}>Next Step</Text>
           </TouchableOpacity>
         ) : (
-          <TouchableOpacity style={styles.buttonSubmit} onPress={handleSubmit} disabled={isSubmitting}>
+          <TouchableOpacity
+            style={[
+              styles.buttonSubmit,
+              { backgroundColor: Object.keys(uploadedDocs).length < (REQUIREMENTS[selectedType!]?.length || 0) ? '#95a5a6' : '#2ecc71' },
+            ]}
+            onPress={handleSubmit}
+            disabled={isSubmitting || Object.keys(uploadedDocs).length < (REQUIREMENTS[selectedType!]?.length || 0)}
+          >
             {isSubmitting ? (
               <ActivityIndicator color="white" />
             ) : (
@@ -421,6 +657,16 @@ export default function NewRequestScreen() {
           </TouchableOpacity>
         )}
       </View>
+      <AddressMapPickerModal
+        visible={showAddressPicker}
+        onClose={() => setShowAddressPicker(false)}
+        onConfirm={(lat, lng, preview) => {
+          void resolveAndApplyAddress(lat, lng, preview);
+        }}
+        initialLat={mapLat}
+        initialLng={mapLng}
+        colors={colors}
+      />
     </View>
   );
 }
@@ -501,6 +747,129 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     marginBottom: 8,
   },
+  formCenterTitle: {
+    textAlign: 'center',
+    fontSize: 20,
+    marginBottom: 18,
+  },
+  propertyFormShell: {
+    width: '100%',
+    maxWidth: 620,
+    alignSelf: 'center',
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 14,
+  },
+  formMicroLabel: {
+    fontSize: 10,
+    marginBottom: 2,
+    fontStyle: 'italic',
+  },
+  slimInput: {
+    minHeight: 40,
+    paddingVertical: 9,
+  },
+  taxDecRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  taxDecInput: {
+    flex: 1,
+    marginBottom: 0,
+  },
+  taxDecActionBtn: {
+    backgroundColor: '#1f5ca8',
+    borderRadius: 4,
+    minHeight: 40,
+    paddingHorizontal: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  taxDecActionBtnText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  grid3: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 12,
+  },
+  gridInput: {
+    flex: 1,
+    marginBottom: 0,
+  },
+  mapPickBtn: {
+    marginTop: 6,
+    minHeight: 40,
+    borderRadius: 6,
+    backgroundColor: '#1f5ca8',
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  mapPickBtnText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  taxDecTable: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#cfd4dc',
+    borderRadius: 6,
+    overflow: 'hidden',
+  },
+  taxDecTableHeader: {
+    flexDirection: 'row',
+    backgroundColor: '#31b3c3',
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+  },
+  taxDecTableHeaderTxt: {
+    color: '#0f1b2e',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  taxDecTableRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#e3e7ed',
+    backgroundColor: '#fff',
+  },
+  taxDecNumCol: {
+    width: 32,
+  },
+  taxDecValCol: {
+    flex: 1,
+  },
+  taxDecActionCol: {
+    width: 88,
+    alignItems: 'flex-end',
+  },
+  taxDecCellTxt: {
+    color: '#1e2b3b',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  taxDecRemoveBtn: {
+    backgroundColor: '#df3b30',
+    borderRadius: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  taxDecRemoveBtnText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '700',
+  },
   sectionSubtitle: {
     fontSize: 14,
     marginBottom: 20,
@@ -579,15 +948,45 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   uploadItem: {
-    marginBottom: 20,
+    marginBottom: 16,
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
-    paddingBottom: 15,
+    paddingBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  reqLeft: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  reqRight: {
+    width: 170,
+    alignItems: 'flex-end',
+  },
+  reqIndexBadge: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+    flexShrink: 0,
+  },
+  reqIndexText: {
+    fontSize: 12,
+    fontWeight: '800',
   },
   uploadItemText: {
+    flex: 1,
+    minWidth: 0,
     fontSize: 14,
     lineHeight: 20,
-    marginBottom: 10,
   },
   uploadBtn: {
     flexDirection: 'row',
@@ -596,7 +995,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 16,
     borderRadius: 6,
-    alignSelf: 'flex-start',
+    alignSelf: 'flex-end',
   },
   uploadBtnText: {
     color: '#fff',
@@ -612,6 +1011,7 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     borderWidth: 1,
     borderColor: '#e0e0e0',
+    alignSelf: 'flex-end',
   },
   fileName: {
     flex: 1,
@@ -654,6 +1054,97 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#e74c3c',
     fontStyle: 'italic',
+  },
+  reviewCard: {
+    padding: 16,
+    borderRadius: 10,
+    borderWidth: 1,
+    marginTop: 12,
+  },
+  reviewCardTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    marginBottom: 12,
+  },
+  reviewRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginBottom: 10,
+  },
+  reviewLabel: {
+    width: 110,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  reviewValue: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'right',
+    lineHeight: 18,
+  },
+  docsHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 10,
+  },
+  docsHeaderMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  docsCountText: {
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  docsProgressTrack: {
+    height: 8,
+    borderRadius: 6,
+    overflow: 'hidden',
+    marginBottom: 12,
+  },
+  docsProgressFill: {
+    height: '100%',
+    borderRadius: 6,
+  },
+  docsList: {
+    borderWidth: 1,
+    borderColor: '#e6e9ef',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  docsItemRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+  },
+  docsItemLeft: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  docsReqText: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '600',
+  },
+  docsStatusText: {
+    fontSize: 12,
+    fontWeight: '800',
+    marginTop: 1,
   },
   footer: {
     flexDirection: 'row',

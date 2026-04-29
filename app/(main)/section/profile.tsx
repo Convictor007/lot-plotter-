@@ -21,15 +21,14 @@ import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
-import { getItem } from '@/lib/appStorage';
 
 import { AddressMapPickerModal, type GeocodedAddressPreview } from '@/components/profile/AddressMapPickerModal';
-import { getMockProfileOverrideForEmail, MOCK_USER } from '@/constants/mockUser';
+import { MOCK_USER } from '@/constants/mockUser';
 import type { PublicUserJson } from '@/database/models';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useAuthenticatedImageDataUri } from '@/hooks/useAuthenticatedImageDataUri';
 import { apiUrl } from '@/lib/api/api-url';
-import { clearAuthSession, getAuthToken, SESSION_USER_EMAIL_KEY } from '@/lib/authSession';
+import { clearAuthSession, getAuthToken } from '@/lib/authSession';
 
 function roleLabel(role: string): string {
   if (role === 'citizen') return 'Citizen';
@@ -313,10 +312,14 @@ export default function ProfileScreen() {
       try {
         const token = await getAuthToken();
         setAuthToken(token);
-        if (token) {
-          const res = await fetch(apiUrl('/api/users/me'), {
-            headers: { Authorization: `Bearer ${token}` },
-          });
+        if (!token) {
+          setProfileLoadNotice('Sign in required. Log in to load and edit your profile.');
+          return;
+        }
+
+        const res = await fetch(apiUrl('/api/users/me'), {
+          headers: { Authorization: `Bearer ${token}` },
+        });
           let json: { success?: boolean; user?: PublicUserJson; code?: string; message?: string } = {};
           try {
             json = (await res.json()) as typeof json;
@@ -331,7 +334,7 @@ export default function ProfileScreen() {
 
           if (res.status === 503 && json.code === 'DB_NOT_CONFIGURED') {
             setProfileLoadNotice(
-              'Database is not configured on the server (set MYSQL_DATABASE or DATABASE_URL in .env and restart). Showing demo profile fields only.'
+              'Database is not configured on the server (set MYSQL_DATABASE or DATABASE_URL in .env and restart).'
             );
           } else if (res.status === 401) {
             setProfileLoadNotice('Could not verify your session. Sign out and sign in again to load your account from the database.');
@@ -345,16 +348,6 @@ export default function ProfileScreen() {
           if (__DEV__) {
             console.warn('[Profile] /api/users/me failed', res.status, json.code ?? json.message);
           }
-        }
-
-        const storedEmail = await getItem(SESSION_USER_EMAIL_KEY);
-        if (storedEmail) {
-          setUserData((prev) => ({
-            ...prev,
-            email: storedEmail,
-            ...getMockProfileOverrideForEmail(storedEmail),
-          }));
-        }
       } catch (e) {
         console.error('Failed to load user data', e);
         setProfileLoadNotice(

@@ -15,16 +15,12 @@ import {
   useWindowDimensions,
   ImageBackground,
   Image,
+  ScrollView,
 } from 'react-native';
-import {
-  MOCK_LOGIN_EMAIL,
-  MOCK_LOGIN_PASSWORD,
-  isMockLoginValid,
-} from '@/constants/mockAuth';
 import type { PublicUserJson } from '@/database/models';
 import { apiUrl } from '@/lib/api/api-url';
 import { requestFacebookAccessToken, requestGoogleIdToken } from '@/lib/auth/social-client';
-import { removeItem, SESSION_AUTH_TOKEN_KEY, setAuthSession, setSessionUserEmail } from '@/lib/authSession';
+import { setAuthSession } from '@/lib/authSession';
 
 const COLORS = {
   primary: '#3b5998', // A formal blue matching the reference
@@ -40,11 +36,15 @@ const COLORS = {
 const BG_IMAGE = require('../../assets/images/balatan-background.png');
 const LOGO_IASSESS = require('../../assets/images/iassesslogo.jpg');
 const LOGO_BALATAN = require('../../assets/images/balatan-icon.jpg');
+/** Temporary convenience for local/dev testing (fills inputs only). */
+const AUTO_FILL_EMAIL = 'dareyes@my.cspc.edu.ph';
+const AUTO_FILL_PASSWORD = 'dsadsadsa';
 
 export default function LoginScreen() {
   const router = useRouter();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
   const isWeb = width > 768; // Breakpoint for web/tablet
+  const isCompactMobile = !isWeb && height < 860;
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -96,17 +96,6 @@ export default function LoginScreen() {
         return;
       }
 
-      if (res.status === 503 && data.code === 'DB_NOT_CONFIGURED') {
-        if (!isMockLoginValid(email, password)) {
-          Alert.alert('Login Failed', 'Invalid credentials');
-          return;
-        }
-        await removeItem(SESSION_AUTH_TOKEN_KEY);
-        await setSessionUserEmail(MOCK_LOGIN_EMAIL);
-        router.replace('/section/lot-plotter');
-        return;
-      }
-
       Alert.alert('Login Failed', data.message || 'Invalid credentials');
     } catch (e) {
       console.error('Login failed', e);
@@ -114,12 +103,6 @@ export default function LoginScreen() {
     } finally {
       setIsLoading(false);
     }
-  };
-
-  const fillMockCredentials = () => {
-    if (isLoading) return;
-    setEmail(MOCK_LOGIN_EMAIL);
-    setPassword(MOCK_LOGIN_PASSWORD);
   };
 
   const handleGoogleLogin = async () => {
@@ -186,6 +169,12 @@ export default function LoginScreen() {
     }
   };
 
+  const handleAutoFill = () => {
+    if (isLoading) return;
+    setEmail(AUTO_FILL_EMAIL);
+    setPassword(AUTO_FILL_PASSWORD);
+  };
+
   return (
     <ImageBackground source={BG_IMAGE} style={styles.backgroundImage} resizeMode="cover">
       <View style={styles.overlay}>
@@ -193,36 +182,50 @@ export default function LoginScreen() {
           style={styles.keyboardView}
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         >
-          <View style={[styles.mainLayout, isWeb ? styles.mainLayoutWeb : styles.mainLayoutMobile]}>
-            
-            {/* Left Side: Welcome Text */}
-            <View style={[styles.leftSection, isWeb && styles.leftSectionWeb]}>
-              <View style={styles.logoContainer}>
-                <Image source={LOGO_BALATAN} style={styles.largeLogo} resizeMode="contain" />
-              </View>
-              <Text style={styles.muniTitle}>MUNICIPALITY OF BALATAN</Text>
-              <Text style={styles.assessorTitle}>MUNICIPAL ASSESSOR&apos;S OFFICE</Text>
-              
-              <Text style={styles.welcomeText}>WELCOME</Text>
-
-              <Text style={styles.dateTimeText}>{currentDate}</Text>
-            </View>
-
-            {/* Right Side: Login Form */}
-            <View style={[styles.rightSection, isWeb && styles.rightSectionWeb]}>
-              <View style={styles.formContainer}>
+          <ScrollView
+            style={styles.authScroll}
+            contentContainerStyle={[styles.authScrollContent, !isWeb && styles.authScrollContentMobile]}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            <View
+              style={[
+                styles.mainLayout,
+                isWeb ? styles.mainLayoutWeb : styles.mainLayoutMobile,
+                isCompactMobile && styles.mainLayoutMobileCompact,
+              ]}
+            >
+              {/* Left Side: Welcome Text */}
+              <View style={[styles.leftSection, isWeb && styles.leftSectionWeb, isCompactMobile && styles.leftSectionCompact]}>
+                <View style={[styles.logoContainer, isCompactMobile && styles.logoContainerCompact]}>
+                  <Image source={LOGO_BALATAN} style={styles.largeLogo} resizeMode="contain" />
+                </View>
+                <Text style={[styles.muniTitle, isCompactMobile && styles.muniTitleCompact]}>MUNICIPALITY OF BALATAN</Text>
+                <Text style={[styles.assessorTitle, isCompactMobile && styles.assessorTitleCompact]}>MUNICIPAL ASSESSOR&apos;S OFFICE</Text>
                 
-                <View style={styles.formHeader}>
-                  <View style={styles.smallLogoPlaceholder}>
+                <Text style={[styles.welcomeText, isCompactMobile && styles.welcomeTextCompact]}>WELCOME</Text>
+
+                <Text style={[styles.dateTimeText, isCompactMobile && styles.dateTimeTextCompact]}>{currentDate}</Text>
+              </View>
+
+              {/* Right Side: Login Form */}
+              <View style={[styles.rightSection, isWeb && styles.rightSectionWeb]}>
+                <View style={[styles.formContainer, isCompactMobile && styles.formContainerCompact]}>
+                
+                <View style={[styles.formHeader, isCompactMobile && styles.formHeaderCompact]}>
+                  <View style={[styles.smallLogoPlaceholder, isCompactMobile && styles.smallLogoPlaceholderCompact]}>
                     <Image source={LOGO_IASSESS} style={styles.smallLogo} resizeMode="contain" />
                   </View>
-                  <Text style={styles.formHeaderText}>BALATAN MUNICIPAL{'\n'}ASSESSOR WEBSITE</Text>
+                  <Text style={[styles.formHeaderText, isCompactMobile && styles.formHeaderTextCompact]}>
+                    BALATAN MUNICIPAL{'\n'}ASSESSOR WEBSITE
+                  </Text>
                 </View>
 
-                <Text style={styles.formTitle}>SIGN IN</Text>
-                <Text style={styles.formSubtitle}>Please Enter your email and password!</Text>
+                <Text style={[styles.formSubtitle, isCompactMobile && styles.formSubtitleCompact]}>
+                  Please Enter your email and password!
+                </Text>
 
-                <View style={styles.inputWrapper}>
+                <View style={[styles.inputWrapper, isCompactMobile && styles.inputWrapperCompact]}>
                   <View style={styles.inputIconContainer}>
                     <Ionicons name="person-outline" size={20} color="#666" />
                   </View>
@@ -241,7 +244,7 @@ export default function LoginScreen() {
                   />
                 </View>
 
-                <View style={styles.inputWrapper}>
+                <View style={[styles.inputWrapper, isCompactMobile && styles.inputWrapperCompact]}>
                   <View style={styles.inputIconContainer}>
                     <Ionicons name="lock-closed-outline" size={20} color="#666" />
                   </View>
@@ -268,26 +271,26 @@ export default function LoginScreen() {
                   </TouchableOpacity>
                 </View>
 
-                <TouchableOpacity
-                  style={[styles.mockFillButton, isLoading && styles.mockFillButtonDisabled]}
-                  onPress={fillMockCredentials}
-                  disabled={isLoading}
-                  accessibilityRole="button"
-                  accessibilityLabel="Fill demo login email and password"
-                >
-                  <Ionicons name="flask-outline" size={18} color={COLORS.primary} />
-                  <Text style={styles.mockFillButtonText}>Use demo account</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.loginButton, isLoading && styles.loginButtonDisabled]}
-                  onPress={handleLogin}
-                  disabled={isLoading}
-                >
-                  <Text style={styles.loginButtonText}>
-                    {isLoading ? 'Signing In...' : 'Sign In'}
-                  </Text>
-                </TouchableOpacity>
+                <View style={[styles.loginActionsRow, isCompactMobile && styles.loginActionsRowCompact]}>
+                  <TouchableOpacity
+                    style={[styles.loginButton, styles.loginButtonFill, isCompactMobile && styles.loginButtonCompact, isLoading && styles.loginButtonDisabled]}
+                    onPress={handleLogin}
+                    disabled={isLoading}
+                  >
+                    <Text style={styles.loginButtonText}>
+                      {isLoading ? 'Signing In...' : 'Sign In'}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.autoFillButton, isLoading && styles.autoFillButtonDisabled]}
+                    onPress={handleAutoFill}
+                    disabled={isLoading}
+                    accessibilityRole="button"
+                    accessibilityLabel="Auto fill login credentials"
+                  >
+                    <Ionicons name="flash-outline" size={20} color={COLORS.primary} />
+                  </TouchableOpacity>
+                </View>
 
                 <View style={styles.socialDividerRow}>
                   <View style={styles.socialDividerLine} />
@@ -295,7 +298,7 @@ export default function LoginScreen() {
                   <View style={styles.socialDividerLine} />
                 </View>
 
-                <View style={styles.socialButtonsRow}>
+                <View style={[styles.socialButtonsRow, isCompactMobile && styles.socialButtonsRowCompact]}>
                   <TouchableOpacity
                     style={[styles.socialButton, styles.googleButton, isLoading && styles.socialButtonDisabled]}
                     onPress={handleGoogleLogin}
@@ -324,7 +327,8 @@ export default function LoginScreen() {
               </View>
             </View>
 
-          </View>
+            </View>
+          </ScrollView>
         </KeyboardAvoidingView>
 
         {/* Loading Overlay */}
@@ -359,6 +363,17 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  authScroll: {
+    width: '100%',
+    flex: 1,
+  },
+  authScrollContent: {
+    flexGrow: 1,
+    justifyContent: 'center',
+  },
+  authScrollContentMobile: {
+    justifyContent: 'flex-start',
+  },
   mainLayout: {
     flexDirection: 'row',
     width: '100%',
@@ -376,9 +391,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 40,
   },
+  mainLayoutMobileCompact: {
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+  },
   leftSection: {
     alignItems: 'center',
     marginBottom: 40,
+  },
+  leftSectionCompact: {
+    marginBottom: 18,
   },
   leftSectionWeb: {
     flex: 1,
@@ -401,6 +423,12 @@ const styles = StyleSheet.create({
     elevation: 5,
     overflow: 'hidden',
   },
+  logoContainerCompact: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    marginBottom: 10,
+  },
   largeLogo: {
     width: '100%',
     height: '100%',
@@ -416,6 +444,9 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     letterSpacing: 1.5,
   },
+  muniTitleCompact: {
+    fontSize: 14,
+  },
   assessorTitle: {
     fontSize: 18,
     fontWeight: 'bold',
@@ -423,6 +454,10 @@ const styles = StyleSheet.create({
     marginBottom: 24,
     letterSpacing: 1,
     textAlign: 'center',
+  },
+  assessorTitleCompact: {
+    fontSize: 15,
+    marginBottom: 14,
   },
   welcomeText: {
     fontSize: 36,
@@ -432,6 +467,9 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.5)',
     textShadowOffset: { width: 1, height: 1 },
     textShadowRadius: 3,
+  },
+  welcomeTextCompact: {
+    fontSize: 28,
   },
   subWelcomeText: {
     fontSize: 32,
@@ -449,6 +487,10 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     textAlign: 'center',
     lineHeight: 28,
+  },
+  dateTimeTextCompact: {
+    fontSize: 15,
+    lineHeight: 23,
   },
   rightSection: {
     width: '100%',
@@ -471,11 +513,18 @@ const styles = StyleSheet.create({
     shadowRadius: 20,
     elevation: 10,
   },
+  formContainerCompact: {
+    padding: 22,
+    maxWidth: 380,
+  },
   formHeader: {
     flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 30,
+  },
+  formHeaderCompact: {
+    marginBottom: 20,
   },
   smallLogoPlaceholder: {
     width: 80,
@@ -487,6 +536,12 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     overflow: 'hidden',
   },
+  smallLogoPlaceholderCompact: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    marginBottom: 8,
+  },
   smallLogo: {
     width: '100%',
     height: '100%',
@@ -496,6 +551,9 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: COLORS.text,
     textAlign: 'center',
+  },
+  formHeaderTextCompact: {
+    fontSize: 11,
   },
   formTitle: {
     fontSize: 22,
@@ -510,6 +568,10 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 30,
   },
+  formSubtitleCompact: {
+    fontSize: 12,
+    marginBottom: 18,
+  },
   inputWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -523,6 +585,10 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 2,
+  },
+  inputWrapperCompact: {
+    height: 44,
+    marginBottom: 14,
   },
   inputIconContainer: {
     marginRight: 10,
@@ -542,29 +608,6 @@ const styles = StyleSheet.create({
   eyeIcon: {
     padding: 10,
   },
-  mockFillButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    alignSelf: 'stretch',
-    marginTop: 4,
-    marginBottom: 8,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 25,
-    borderWidth: 1.5,
-    borderColor: COLORS.primary,
-    backgroundColor: 'rgba(59, 89, 152, 0.08)',
-  },
-  mockFillButtonDisabled: {
-    opacity: 0.5,
-  },
-  mockFillButtonText: {
-    color: COLORS.primary,
-    fontSize: 14,
-    fontWeight: '600',
-  },
   loginButton: {
     backgroundColor: COLORS.primary,
     borderRadius: 25,
@@ -579,8 +622,41 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
     elevation: 4,
   },
+  loginActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+    marginBottom: 20,
+    gap: 10,
+  },
+  loginActionsRowCompact: {
+    marginBottom: 14,
+  },
+  loginButtonFill: {
+    flex: 1,
+    marginTop: 0,
+    marginBottom: 0,
+  },
+  loginButtonCompact: {
+    height: 46,
+    marginBottom: 0,
+  },
   loginButtonDisabled: {
     backgroundColor: '#BDC3C7',
+  },
+  autoFillButton: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    borderWidth: 1,
+    borderColor: '#D0D0D0',
+    overflow: 'hidden',
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  autoFillButtonDisabled: {
+    opacity: 0.55,
   },
   loginButtonText: {
     color: '#ffffff',
@@ -621,6 +697,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     marginBottom: 18,
+  },
+  socialButtonsRowCompact: {
+    marginBottom: 14,
   },
   socialButton: {
     flex: 1,

@@ -7,16 +7,7 @@ export type UserRole = 'citizen' | 'assessor' | 'admin';
 /** Matches `users.verification_status` ENUM in schema.sql */
 export type VerificationStatus = 'unverified' | 'pending' | 'verified' | 'rejected';
 
-export type TransactionStatus =
-  | 'draft'
-  | 'submitted'
-  | 'under_review'
-  | 'pending_documents'
-  | 'approved'
-  | 'rejected'
-  | 'ready_for_payment'
-  | 'completed'
-  | 'cancelled';
+export type TransactionStatus = 'canceled' | 'pending' | 'approved' | 'rejected';
 
 export interface UserRow {
   User_id: number;
@@ -49,6 +40,7 @@ export interface TransactionRequestRow {
   Transaction_id: number;
   reference_number: string;
   user_id: number;
+  assigned_assessor_user_id: number | null;
   type: string | null;
   status: TransactionStatus | null;
   notes: string | null;
@@ -62,10 +54,12 @@ export interface RequestDocumentRow {
   Documents_id: number;
   transaction_request_id: number;
   type: string;
+  status: TransactionStatus;
   file_name: string;
   file_url: string;
   file_size: number;
   mime_type: string;
+  uploaded_by_user_id: number | null;
   uploaded_at: Date;
   verified: number;
 }
@@ -73,10 +67,6 @@ export interface RequestDocumentRow {
 export interface GisPlotRow {
   Gis_id: number;
   user_id: number;
-  transaction_request_id: number | null;
-  barangay: string | null;
-  municipality: string | null;
-  province: string | null;
   tie_points: unknown;
   center_lat: string | null;
   center_lng: string | null;
@@ -84,10 +74,7 @@ export interface GisPlotRow {
   polygon: unknown;
   area: string | null;
   Perimeter: string | null;
-  extracted_from_title: number;
-  title_file_name: string | null;
-  historical_comparison_notes: string | null;
-  created_at: Date | null;
+  created_at: Date;
 }
 
 /** Safe user JSON (no password_hash). */

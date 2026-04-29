@@ -55,6 +55,12 @@ interface MapViewProps {
     color?: string;
     fillColor?: string;
   } | null;
+  /** Optional multi-lot polygons to render and fit as one extent. */
+  polygons?: Array<{
+    coordinates: [number, number][];
+    color?: string;
+    fillColor?: string;
+  }> | null;
   /** Optional boundary polygon (e.g. municipality) to show on the map */
   boundary?: {
     coordinates: [number, number][];
@@ -88,6 +94,29 @@ interface MapViewProps {
 
 function polygonCoordsKey(polygon: MapViewProps['polygon']): string {
   return JSON.stringify(polygon?.coordinates ?? null);
+}
+
+function collectGeoJsonPolygonRings(geojson: GeoJSON.FeatureCollection | null | undefined): [number, number][][] {
+  const rings: [number, number][][] = [];
+  if (!geojson?.features?.length) return rings;
+  for (const f of geojson.features) {
+    const g = f.geometry;
+    if (!g) continue;
+    if (g.type === 'Polygon') {
+      const outer = g.coordinates?.[0] as [number, number][] | undefined;
+      if (outer?.length) rings.push(outer);
+    } else if (g.type === 'MultiPolygon') {
+      for (const p of g.coordinates || []) {
+        const outer = p?.[0] as [number, number][] | undefined;
+        if (outer?.length) rings.push(outer);
+      }
+    }
+  }
+  return rings;
+}
+
+function polygonsCoordsKey(polygons: MapViewProps['polygons']): string {
+  return JSON.stringify((polygons || []).map((p) => p.coordinates));
 }
 
 function googleMapTypeIdForBasemap(b: BasemapStyle): string {
@@ -214,6 +243,7 @@ function WebMapViewGoogle({
   center,
   zoom = 16,
   polygon,
+  polygons,
   boundary,
   boundaryGeoJson,
   markers,
@@ -239,6 +269,7 @@ function WebMapViewGoogle({
 
   /** Only when coordinates change — avoids full map reset when color / label toggles change */
   const polyCoordsKey = useMemo(() => polygonCoordsKey(polygon), [polygon?.coordinates]);
+  const multiPolyCoordsKey = useMemo(() => polygonsCoordsKey(polygons), [polygons]);
 
   const [mapNonce, setMapNonce] = useState(0);
 
@@ -297,16 +328,46 @@ function WebMapViewGoogle({
         }
 
         if (boundaryGeoJson && boundaryGeoJson.features?.length > 0) {
-          map.data.addGeoJson(boundaryGeoJson as object);
-          map.data.setStyle({
-            fillColor: '#15803d',
-            fillOpacity: 0.12,
-            strokeColor: '#15803d',
-            strokeWeight: 1.5,
+          const rings = collectGeoJsonPolygonRings(boundaryGeoJson);
+          rings.forEach((ring) => {
+            const paths = ring.map((c) => ({ lat: c[1], lng: c[0] }));
+            const poly = new g.Polygon({
+              paths,
+              strokeColor: '#00e5ff',
+              strokeOpacity: 0.95,
+              strokeWeight: 2.4,
+              fillColor: '#00b894',
+              fillOpacity: 0,
+              clickable: false,
+              zIndex: 30,
+              map,
+            });
+            structureOverlayRefs.current.push(poly);
           });
         }
 
-        if (polygon && polygon.coordinates.length > 0) {
+        if (polygons && polygons.length > 0) {
+          const bounds = new g.LatLngBounds();
+          polygons.forEach((mp) => {
+            if (!mp?.coordinates?.length) return;
+            const paths = mp.coordinates.map((c) => ({ lat: c[1], lng: c[0] }));
+            const poly = new g.Polygon({
+              paths,
+              strokeColor: mp.color || '#8e1616',
+              fillColor: mp.fillColor || '#8e1616',
+              fillOpacity: 0,
+              strokeWeight: 2,
+              map,
+            });
+            structureOverlayRefs.current.push(poly);
+            mp.coordinates.forEach((c) => bounds.extend({ lat: c[1], lng: c[0] }));
+          });
+          const fitId = `${multiPolyCoordsKey}|${fitPolygonToken}`;
+          if (lastFitIdRef.current !== fitId && !bounds.isEmpty()) {
+            map.fitBounds(bounds, 50);
+            lastFitIdRef.current = fitId;
+          }
+        } else if (polygon && polygon.coordinates.length > 0) {
           const paths = polygon.coordinates.map((c) => ({ lat: c[1], lng: c[0] }));
           const poly = new g.Polygon({
             paths,
@@ -331,12 +392,10 @@ function WebMapViewGoogle({
           if (boundary?.coordinates?.length) {
             boundary.coordinates.forEach((c) => bounds.extend({ lat: c[1], lng: c[0] }));
           }
-          map.data.forEach((feature: { getGeometry: () => { forEachLatLng?: (fn: (ll: { lat: () => number; lng: () => number }) => void) => void } }) => {
-            const geom = feature.getGeometry();
-            if (geom?.forEachLatLng) {
-              geom.forEachLatLng((ll) => bounds.extend(ll));
-            }
-          });
+          if (boundaryGeoJson?.features?.length) {
+            const rings = collectGeoJsonPolygonRings(boundaryGeoJson);
+            rings.forEach((ring) => ring.forEach((c) => bounds.extend({ lat: c[1], lng: c[0] })));
+          }
           const bFitId = `boundary|${JSON.stringify(boundary?.coordinates)}|${boundaryGeoJson?.features?.length ?? 0}|${fitPolygonToken}`;
           if (!bounds.isEmpty()) {
             if (lastFitIdRef.current !== bFitId) {
@@ -393,11 +452,11 @@ function WebMapViewGoogle({
       lotPolygonRef.current = null;
     };
     // basemap is applied via setMapTypeId in a separate effect — do not list basemap here or the map resets when switching layers
-  }, [center.lat, center.lng, zoom, polyCoordsKey, boundary, boundaryGeoJson, markers, fitPolygonToken]);
+  }, [center.lat, center.lng, zoom, polyCoordsKey, multiPolyCoordsKey, boundary, boundaryGeoJson, markers, fitPolygonToken]);
 
   /** Labels + lot stroke/fill — does not recreate the map or call fitBounds (no “jump”) */
   useEffect(() => {
-    if (!isWeb || !mapInstanceRef.current || !polygon?.coordinates?.length) {
+    if (!isWeb || !mapInstanceRef.current || !polygon?.coordinates?.length || (polygons && polygons.length > 0)) {
       clearLabelOverlays();
       return;
     }
@@ -453,7 +512,7 @@ function WebMapViewGoogle({
       infoWindow.open(map);
       labelOverlayRefs.current.push({ setMap: () => infoWindow.close() });
     }
-  }, [mapNonce, polygon, showAreaLabel, showDistanceLabel, area]);
+  }, [mapNonce, polygon, polygons, showAreaLabel, showDistanceLabel, area]);
 
   useEffect(() => {
     if (mapInstanceRef.current) {
@@ -502,6 +561,7 @@ function NativeMapViewGoogleWebView({
   center,
   zoom = 16,
   polygon,
+  polygons,
   boundary,
   boundaryGeoJson,
   markers,
@@ -521,6 +581,7 @@ function NativeMapViewGoogleWebView({
   const key = GOOGLE_MAPS_API_KEY ? encodeURIComponent(GOOGLE_MAPS_API_KEY) : '';
 
   const polyCoordsKey = useMemo(() => polygonCoordsKey(polygon), [polygon?.coordinates]);
+  const multiPolyCoordsKey = useMemo(() => polygonsCoordsKey(polygons), [polygons]);
 
   const lotUiPayload = useMemo(
     () =>
@@ -532,6 +593,18 @@ function NativeMapViewGoogleWebView({
         area: area !== undefined && area !== null ? area : null,
       }),
     [polygon?.color, polygon?.fillColor, showAreaLabel, showDistanceLabel, area]
+  );
+
+  const fitPayload = useMemo(
+    () =>
+      safeJsonForScript({
+        polygon: polygon || null,
+        polygons: polygons || null,
+        boundary: boundary || null,
+        boundaryGeoJson: boundaryGeoJson || null,
+        fitToken: fitPolygonToken,
+      }),
+    [polygon, polygons, boundary, boundaryGeoJson, fitPolygonToken]
   );
 
   useEffect(() => {
@@ -561,8 +634,61 @@ function NativeMapViewGoogleWebView({
     `);
   }, [lotUiPayload]);
 
+  /** Fit map without reloading WebView when user taps fit polygon. */
+  useEffect(() => {
+    if (!webviewRef.current) return;
+    webviewRef.current.injectJavaScript(`
+      (function() {
+        try {
+          if (!window.map || !window.google || !window.google.maps) return true;
+          var g = window.google.maps;
+          var payload = ${fitPayload};
+          var map = window.map;
+          function getRingsFromGeoJson(gj) {
+            var out = [];
+            if (!gj || !gj.features) return out;
+            gj.features.forEach(function(f) {
+              var geom = f && f.geometry;
+              if (!geom) return;
+              if (geom.type === 'Polygon' && geom.coordinates && geom.coordinates[0] && geom.coordinates[0].length) {
+                out.push(geom.coordinates[0]);
+              } else if (geom.type === 'MultiPolygon' && geom.coordinates && geom.coordinates.length) {
+                geom.coordinates.forEach(function(p) {
+                  if (p && p[0] && p[0].length) out.push(p[0]);
+                });
+              }
+            });
+            return out;
+          }
+          var bounds = new g.LatLngBounds();
+          var hasAny = false;
+          if (payload.polygons && payload.polygons.length) {
+            payload.polygons.forEach(function(p) {
+              if (!p || !p.coordinates) return;
+              p.coordinates.forEach(function(c) { bounds.extend({ lat: c[1], lng: c[0] }); hasAny = true; });
+            });
+          } else if (payload.polygon && payload.polygon.coordinates && payload.polygon.coordinates.length) {
+            payload.polygon.coordinates.forEach(function(c) { bounds.extend({ lat: c[1], lng: c[0] }); hasAny = true; });
+          } else {
+            if (payload.boundary && payload.boundary.coordinates) {
+              payload.boundary.coordinates.forEach(function(c) { bounds.extend({ lat: c[1], lng: c[0] }); hasAny = true; });
+            }
+            getRingsFromGeoJson(payload.boundaryGeoJson).forEach(function(r) {
+              r.forEach(function(c) { bounds.extend({ lat: c[1], lng: c[0] }); hasAny = true; });
+            });
+          }
+          if (hasAny && !bounds.isEmpty()) {
+            map.fitBounds(bounds, 50);
+          }
+        } catch (e) {}
+        true;
+      })();
+    `);
+  }, [fitPayload]);
+
   const htmlContent = useMemo(() => {
     const polygonJson = safeJsonForScript(polygon || null);
+    const polygonsJson = safeJsonForScript(polygons || null);
     const boundaryJson = safeJsonForScript(boundary || null);
     const boundaryGeoJsonStr = safeJsonForScript(boundaryGeoJson || null);
     const markersJson = safeJsonForScript(markers || null);
@@ -668,13 +794,14 @@ function NativeMapViewGoogleWebView({
             window.map = new g.Map(document.getElementById('map'), {
               center: { lat: ${center.lat}, lng: ${center.lng} },
               zoom: ${zoom},
-              mapTypeId: g.MapTypeId.${mapTypeJs},
+              mapTypeId: g.MapTypeId.ROADMAP,
               mapTypeControl: false,
               streetViewControl: false,
               fullscreenControl: false
             });
             var map = window.map;
             var polygonData = ${polygonJson};
+            var polygonsData = ${polygonsJson};
             var boundaryData = ${boundaryJson};
             var boundaryGeoJsonData = ${boundaryGeoJsonStr};
             var markersData = ${markersJson};
@@ -690,16 +817,63 @@ function NativeMapViewGoogleWebView({
                 map: map
               });
             }
+            function getRingsFromGeoJson(gj) {
+              var out = [];
+              if (!gj || !gj.features) return out;
+              gj.features.forEach(function(f) {
+                var geom = f && f.geometry;
+                if (!geom) return;
+                if (geom.type === 'Polygon' && geom.coordinates && geom.coordinates[0] && geom.coordinates[0].length) {
+                  out.push(geom.coordinates[0]);
+                } else if (geom.type === 'MultiPolygon' && geom.coordinates && geom.coordinates.length) {
+                  geom.coordinates.forEach(function(p) {
+                    if (p && p[0] && p[0].length) out.push(p[0]);
+                  });
+                }
+              });
+              return out;
+            }
             if (boundaryGeoJsonData && boundaryGeoJsonData.features) {
-              map.data.addGeoJson(boundaryGeoJsonData);
-              map.data.setStyle({
-                fillColor: '#15803d',
-                fillOpacity: 0.12,
-                strokeColor: '#15803d',
-                strokeWeight: 1.5
+              var bRings = getRingsFromGeoJson(boundaryGeoJsonData);
+              bRings.forEach(function(ring) {
+                var bpaths = ring.map(function(c) { return { lat: c[1], lng: c[0] }; });
+                new g.Polygon({
+                  paths: bpaths,
+                  strokeColor: '#00e5ff',
+                  strokeOpacity: 0.95,
+                  strokeWeight: 2.4,
+                  fillColor: '#00b894',
+                  fillOpacity: 0,
+                  clickable: false,
+                  zIndex: 30,
+                  map: map
+                });
               });
             }
-            if (polygonData && polygonData.coordinates.length > 0) {
+            if (polygonsData && polygonsData.length > 0) {
+              var mb = new g.LatLngBounds();
+              polygonsData.forEach(function(p) {
+                if (!p || !p.coordinates || !p.coordinates.length) return;
+                var mpaths = p.coordinates.map(function(c) { return { lat: c[1], lng: c[0] }; });
+                new g.Polygon({
+                  paths: mpaths,
+                  strokeColor: p.color || '#8e1616',
+                  fillColor: p.fillColor || '#8e1616',
+                  fillOpacity: 0,
+                  strokeWeight: 2,
+                  map: map
+                });
+                p.coordinates.forEach(function(c) { mb.extend({ lat: c[1], lng: c[0] }); });
+              });
+              window.iassessLotPolygon = null;
+              window.iassessPolygonCoords = null;
+            var mFitId = JSON.stringify(polygonsData.map(function(p){ return p.coordinates; }));
+              var prevMFit = sessionStorage.getItem('iassess_multi_poly_fit');
+              if (!mb.isEmpty() && prevMFit !== mFitId) {
+                map.fitBounds(mb, 50);
+                sessionStorage.setItem('iassess_multi_poly_fit', mFitId);
+              }
+            } else if (polygonData && polygonData.coordinates.length > 0) {
               var paths = polygonData.coordinates.map(function(c) { return { lat: c[1], lng: c[0] }; });
               var lotPoly = new g.Polygon({
                 paths: paths,
@@ -716,7 +890,7 @@ function NativeMapViewGoogleWebView({
               var bounds = new g.LatLngBounds();
               polygonData.coordinates.forEach(function(c) { bounds.extend({ lat: c[1], lng: c[0] }); });
               var polyKeyStr = JSON.stringify(polygonData.coordinates || null);
-              var fitId = polyKeyStr + '|' + ${JSON.stringify(fitPolygonToken)};
+              var fitId = polyKeyStr;
               var prevFit = sessionStorage.getItem('iassess_poly_fit');
               if (prevFit !== fitId) {
                 map.fitBounds(bounds, 50);
@@ -730,13 +904,12 @@ function NativeMapViewGoogleWebView({
               if (boundaryData && boundaryData.coordinates.length) {
                 boundaryData.coordinates.forEach(function(c) { bb.extend({ lat: c[1], lng: c[0] }); });
               }
-              map.data.forEach(function(feature) {
-                var geom = feature.getGeometry();
-                if (geom && geom.forEachLatLng) {
-                  geom.forEachLatLng(function(ll) { bb.extend(ll); });
-                }
-              });
-              var bFitId = 'boundary|' + JSON.stringify(boundaryData && boundaryData.coordinates) + '|' + (boundaryGeoJsonData && boundaryGeoJsonData.features ? boundaryGeoJsonData.features.length : 0) + '|' + ${JSON.stringify(fitPolygonToken)};
+              if (boundaryGeoJsonData && boundaryGeoJsonData.features) {
+                getRingsFromGeoJson(boundaryGeoJsonData).forEach(function(ring) {
+                  ring.forEach(function(c) { bb.extend({ lat: c[1], lng: c[0] }); });
+                });
+              }
+              var bFitId = 'boundary|' + JSON.stringify(boundaryData && boundaryData.coordinates) + '|' + (boundaryGeoJsonData && boundaryGeoJsonData.features ? boundaryGeoJsonData.features.length : 0);
               var prevBFit = sessionStorage.getItem('iassess_boundary_fit');
               if (!bb.isEmpty() && prevBFit !== bFitId) {
                 map.fitBounds(bb, 60);
@@ -766,7 +939,7 @@ function NativeMapViewGoogleWebView({
       </body>
       </html>
     `;
-  }, [center.lat, center.lng, zoom, polyCoordsKey, boundary, boundaryGeoJson, markers, fitPolygonToken, key, mapTypeJs]);
+  }, [center.lat, center.lng, zoom, polyCoordsKey, multiPolyCoordsKey, boundary, boundaryGeoJson, markers, key]);
 
   if (!GOOGLE_MAPS_API_KEY) {
     return (
@@ -1071,7 +1244,7 @@ function MapViewWithControls(props: MapViewProps) {
   const [basemap, setBasemap] = useState<BasemapStyle>(props.basemap || 'satellite');
   const [fitBump, setFitBump] = useState(0);
 
-  const hasPolygon = Boolean(props.polygon?.coordinates?.length);
+  const hasPolygon = Boolean(props.polygon?.coordinates?.length || props.polygons?.length);
   const fitPolygonToken = `${props.fitPolygonTrigger ?? 0}|${fitBump}`;
 
   useEffect(() => {

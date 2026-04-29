@@ -10,11 +10,12 @@ export function generateReferenceNumber(): string {
 export async function listTransactionsForUser(userId: number): Promise<TransactionRequestRow[]> {
   const pool = getPool();
   const [rows] = await pool.execute<RowDataPacket[]>(
-    `SELECT Transaction_id, reference_number, user_id, type, status, notes, assessor_notes,
+    `SELECT transaction_id AS Transaction_id, owner_user_id AS user_id, assigned_assessor_user_id,
+            reference_number, type, status, notes, assessor_notes,
             submitted_at, updated_at, completed_at
      FROM transaction_requests
-     WHERE user_id = ?
-     ORDER BY submitted_at DESC, Transaction_id DESC`,
+     WHERE owner_user_id = ?
+     ORDER BY submitted_at DESC, transaction_id DESC`,
     [userId]
   );
   return rows as TransactionRequestRow[];
@@ -23,9 +24,10 @@ export async function listTransactionsForUser(userId: number): Promise<Transacti
 export async function findTransactionById(id: number): Promise<TransactionRequestRow | null> {
   const pool = getPool();
   const [rows] = await pool.execute<RowDataPacket[]>(
-    `SELECT Transaction_id, reference_number, user_id, type, status, notes, assessor_notes,
+    `SELECT transaction_id AS Transaction_id, owner_user_id AS user_id, assigned_assessor_user_id,
+            reference_number, type, status, notes, assessor_notes,
             submitted_at, updated_at, completed_at
-     FROM transaction_requests WHERE Transaction_id = ? LIMIT 1`,
+     FROM transaction_requests WHERE transaction_id = ? LIMIT 1`,
     [id]
   );
   if (!rows.length) return null;
@@ -43,7 +45,7 @@ export async function createTransaction(input: {
   const now = new Date();
   const [res] = await pool.execute<ResultSetHeader>(
     `INSERT INTO transaction_requests (
-      reference_number, user_id, type, status, notes, submitted_at, updated_at
+      reference_number, owner_user_id, type, status, notes, submitted_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [
       input.reference_number,
@@ -83,7 +85,7 @@ export async function updateTransactionAssessor(
   }
   values.push(transactionId);
   const [res] = await pool.execute<ResultSetHeader>(
-    `UPDATE transaction_requests SET ${fields.join(', ')} WHERE Transaction_id = ?`,
+    `UPDATE transaction_requests SET ${fields.join(', ')} WHERE transaction_id = ?`,
     values as (string | number | Date | null)[]
   );
   return res.affectedRows > 0;

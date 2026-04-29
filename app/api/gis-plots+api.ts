@@ -30,10 +30,6 @@ export async function POST(req: Request) {
 
   try {
     const body = (await req.json()) as {
-      transaction_request_id?: number | null;
-      barangay?: string | null;
-      municipality?: string | null;
-      province?: string | null;
       tie_points?: unknown;
       center_lat?: number | null;
       center_lng?: number | null;
@@ -41,17 +37,10 @@ export async function POST(req: Request) {
       polygon?: unknown;
       area?: number | null;
       perimeter?: number | null;
-      extracted_from_title?: number;
-      title_file_name?: string | null;
-      historical_comparison_notes?: string | null;
     };
 
     const id = await createGisPlot({
       user_id: auth.userId,
-      transaction_request_id: body.transaction_request_id ?? null,
-      barangay: body.barangay,
-      municipality: body.municipality,
-      province: body.province,
       tie_points: body.tie_points,
       center_lat: body.center_lat,
       center_lng: body.center_lng,
@@ -59,9 +48,6 @@ export async function POST(req: Request) {
       polygon: body.polygon,
       area: body.area,
       perimeter: body.perimeter,
-      extracted_from_title: body.extracted_from_title,
-      title_file_name: body.title_file_name,
-      historical_comparison_notes: body.historical_comparison_notes,
     });
 
     return Response.json({ success: true, data: { Gis_id: id } }, { status: 201 });

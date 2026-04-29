@@ -165,6 +165,13 @@ export function generatePolygonFromBoundaries(
  * Note: boundaries[0] is MON -> C1, so the lot itself is boundaries.slice(1).
  */
 export function calculateLotAreaAndPerimeter(boundaries: BoundaryPoint[]): { area: number, perimeter: number } {
+  return calculateLotAreaAndPerimeterWithBearingOffset(boundaries, 0);
+}
+
+export function calculateLotAreaAndPerimeterWithBearingOffset(
+  boundaries: BoundaryPoint[],
+  bearingOffsetDeg: number
+): { area: number; perimeter: number } {
   if (boundaries.length < 2) return { area: 0, perimeter: 0 };
   
   const lotBoundaries = boundaries.slice(1);
@@ -175,7 +182,7 @@ export function calculateLotAreaAndPerimeter(boundaries: BoundaryPoint[]): { are
   let perimeter = 0;
 
   for (const point of lotBoundaries) {
-    const bearing = parseBearing(point.bearing);
+    const bearing = normalizeAzimuth(parseBearing(point.bearing) + bearingOffsetDeg);
     const azimuthRad = bearing * (Math.PI / 180);
     
     x += Math.sin(azimuthRad) * point.distance;
@@ -214,7 +221,8 @@ export function generateLotPolygonFromTraverse(
   boundaries: BoundaryPoint[],
   tieX?: number,
   tieY?: number,
-  tieZone?: number | string
+  tieZone?: number | string,
+  bearingOffsetDeg: number = 0
 ): Array<[number, number]> {
   if (boundaries.length === 0) {
     return [];
@@ -229,7 +237,7 @@ export function generateLotPolygonFromTraverse(
   
   // First, find Corner 1 relative to Tie Point
   if (boundaries.length > 0) {
-    const tpBearing = parseBearing(boundaries[0].bearing);
+    const tpBearing = normalizeAzimuth(parseBearing(boundaries[0].bearing) + bearingOffsetDeg);
     const tpAzimuthRad = tpBearing * (Math.PI / 180);
     x += Math.sin(tpAzimuthRad) * boundaries[0].distance;
     y += Math.cos(tpAzimuthRad) * boundaries[0].distance;
@@ -240,16 +248,94 @@ export function generateLotPolygonFromTraverse(
   
   const ring: Array<[number, number]> = [[x, y]];
 
+  const densifyCurveSegment = (
+    startX: number,
+    startY: number,
+    bearing: number,
+    fallbackDistance: number,
+    meta: BoundaryPoint
+  ): Array<[number, number]> => {
+    const radius = Number(meta.curveRadius || 0);
+    if (!Number.isFinite(radius) || radius <= 0) {
+      const az = bearing * (Math.PI / 180);
+      return [[startX + Math.sin(az) * fallbackDistance, startY + Math.cos(az) * fallbackDistance]];
+    }
+
+    const deltaRadFromMeta =
+      Number.isFinite(Number(meta.curveDelta)) && Number(meta.curveDelta) > 0
+        ? (Number(meta.curveDelta) * Math.PI) / 180
+        : null;
+    const chordLengthFromMeta =
+      Number.isFinite(Number(meta.curveChord)) && Number(meta.curveChord) > 0 ? Number(meta.curveChord) : null;
+    const chordLen =
+      chordLengthFromMeta ??
+      (deltaRadFromMeta ? 2 * radius * Math.sin(deltaRadFromMeta / 2) : fallbackDistance);
+
+    if (!Number.isFinite(chordLen) || chordLen <= 0) {
+      const az = bearing * (Math.PI / 180);
+      return [[startX + Math.sin(az) * fallbackDistance, startY + Math.cos(az) * fallbackDistance]];
+    }
+
+    const az = bearing * (Math.PI / 180);
+    const endX = startX + Math.sin(az) * chordLen;
+    const endY = startY + Math.cos(az) * chordLen;
+    const dx = endX - startX;
+    const dy = endY - startY;
+    const chord = Math.hypot(dx, dy);
+    if (!Number.isFinite(chord) || chord <= 0 || chord / 2 > radius) {
+      return [[endX, endY]];
+    }
+
+    const mx = (startX + endX) / 2;
+    const my = (startY + endY) / 2;
+    const ux = dx / chord;
+    const uy = dy / chord;
+    const px = -uy;
+    const py = ux;
+    const h = Math.sqrt(Math.max(0, radius * radius - (chord * chord) / 4));
+
+    const centerLeft = [mx + px * h, my + py * h] as const;
+    const centerRight = [mx - px * h, my - py * h] as const;
+    const dir = (meta.curveDirection || 'L').toUpperCase() === 'R' ? 'R' : 'L';
+    const center = dir === 'R' ? centerRight : centerLeft;
+
+    const startAng = Math.atan2(startY - center[1], startX - center[0]);
+    const endAng = Math.atan2(endY - center[1], endX - center[0]);
+    const ccwSweep = ((endAng - startAng) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+    const cwSweep = ((startAng - endAng) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+    const sweep = deltaRadFromMeta && deltaRadFromMeta > 0 ? deltaRadFromMeta : dir === 'R' ? cwSweep : ccwSweep;
+    const stepCount = Math.max(6, Math.ceil((sweep * 180) / Math.PI / 10));
+    const sign = dir === 'R' ? -1 : 1;
+
+    const pts: Array<[number, number]> = [];
+    for (let i = 1; i <= stepCount; i++) {
+      const t = i / stepCount;
+      const a = startAng + sign * sweep * t;
+      pts.push([center[0] + radius * Math.cos(a), center[1] + radius * Math.sin(a)]);
+    }
+    // Ensure exact chord endpoint as final point.
+    pts[pts.length - 1] = [endX, endY];
+    return pts;
+  };
+
   // Then traverse the lot corners
   for (let i = 1; i < boundaries.length; i++) {
     const point = boundaries[i];
-    const bearing = parseBearing(point.bearing);
-    const azimuthRad = bearing * (Math.PI / 180);
-    
-    x += Math.sin(azimuthRad) * point.distance;
-    y += Math.cos(azimuthRad) * point.distance;
-    
-    ring.push([x, y]);
+    const bearing = normalizeAzimuth(parseBearing(point.bearing) + bearingOffsetDeg);
+    const isCurve = (point.segmentType || 'line') === 'curve';
+    if (isCurve) {
+      const curvePoints = densifyCurveSegment(x, y, bearing, point.distance, point);
+      for (const cp of curvePoints) {
+        x = cp[0];
+        y = cp[1];
+        ring.push([x, y]);
+      }
+    } else {
+      const azimuthRad = bearing * (Math.PI / 180);
+      x += Math.sin(azimuthRad) * point.distance;
+      y += Math.cos(azimuthRad) * point.distance;
+      ring.push([x, y]);
+    }
   }
 
   // We DO NOT apply Bowditch adjustment here.
@@ -389,7 +475,8 @@ export function checkClosureError(
   tieLng?: number,
   tieX?: number,
   tieY?: number,
-  tieZone?: number | string
+  tieZone?: number | string,
+  bearingOffsetDeg: number = 0
 ): { error: number; percentage: number; isAcceptable: boolean } {
   const lat0 = tieLat ?? 13.3;
   const lng0 = tieLng ?? 123.2;
@@ -397,7 +484,7 @@ export function checkClosureError(
   const lotSides = boundaries.slice(1);
   const lotPerimeter = lotSides.reduce((sum, p) => sum + p.distance, 0);
 
-  const ring = generateLotPolygonFromTraverse(lat0, lng0, boundaries, tieX, tieY, tieZone);
+  const ring = generateLotPolygonFromTraverse(lat0, lng0, boundaries, tieX, tieY, tieZone, bearingOffsetDeg);
   if (ring.length < 4) {
     return { error: 0, percentage: 0, isAcceptable: true };
   }
@@ -656,12 +743,17 @@ function decimalToCardinal(decimal: number): string {
   return cardinals[index];
 }
 
+function normalizeAzimuth(value: number): number {
+  return ((value % 360) + 360) % 360;
+}
+
 export default {
   parseBearing,
   calculateNextPoint,
   generatePolygonFromBoundaries,
   generateLotPolygonFromTraverse,
   calculateLotAreaAndPerimeter,
+  calculateLotAreaAndPerimeterWithBearingOffset,
   calculatePolygonArea,
   calculatePolygonPerimeter,
   haversineDistance,

@@ -13,6 +13,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useTheme } from '@/contexts/ThemeContext';
+import { formatSurveyLegSheetLabel } from '@/utils/survey-leg-label';
 import type { TiePoint } from '@/services/tiepoints.service';
 import type { ParsedCorner, ScanReviewMeta, ScannedLot } from '@/utils/ocr-utils';
 
@@ -40,6 +41,30 @@ function lotChipLabel(lot: ScannedLot, index: number): string {
   return `Lot ${index + 1}`;
 }
 
+function validateCornerRow(row: ParsedCorner): string | null {
+  const ns = (row.ns || '').trim().toUpperCase();
+  const ew = (row.ew || '').trim().toUpperCase();
+  const degRaw = (row.deg || '').trim();
+  const minRaw = (row.min || '').trim();
+  const distRaw = (row.distance || '').trim();
+
+  if (!['N', 'S'].includes(ns)) return 'NS must be N or S';
+  if (!['E', 'W'].includes(ew)) return 'EW must be E or W';
+  if (!/^\d+$/.test(degRaw)) return 'Degree is missing/invalid';
+  if (!/^\d+$/.test(minRaw)) return 'Minute is missing/invalid';
+
+  const deg = Number(degRaw);
+  const min = Number(minRaw);
+  if (deg < 0 || deg > 89) return 'Degree must be 0-89';
+  if (min < 0 || min > 59) return 'Minute must be 0-59';
+
+  if (!/^\d+(\.\d+)?$/.test(distRaw)) return 'Distance is missing/invalid';
+  const dist = Number(distRaw);
+  if (!Number.isFinite(dist) || dist <= 0) return 'Distance must be > 0';
+
+  return null;
+}
+
 export function ScanReviewModal({
   visible,
   lots,
@@ -59,6 +84,58 @@ export function ScanReviewModal({
   const maxContentWidth = Math.min(560, windowWidth);
 
   const draft = drafts[selectedLotIdx] ?? [];
+  const selectedLotRowErrors = useMemo(() => {
+    const rows = drafts[selectedLotIdx] ?? [];
+    return rows.map((row) => validateCornerRow(row));
+  }, [drafts, selectedLotIdx]);
+  const validationIssues = useMemo(() => {
+    const issues: string[] = [];
+    drafts.forEach((rows, lotIdx) => {
+      if (!rows || rows.length < 3) {
+        issues.push(`${lotChipLabel(lots[lotIdx] || { corners: [] }, lotIdx)}: needs at least 3 lines.`);
+        return;
+      }
+      rows.forEach((row, rowIdx) => {
+        const err = validateCornerRow(row);
+        if (err) {
+          issues.push(
+            `${lotChipLabel(lots[lotIdx] || { corners: [] }, lotIdx)} · ${formatSurveyLegSheetLabel(
+              rowIdx + 1,
+              row.sheetLineLabel
+            )}: ${err}.`
+          );
+        }
+      });
+    });
+    return issues;
+  }, [drafts, lots]);
+  const firstInvalid = useMemo(() => {
+    for (let lotIdx = 0; lotIdx < drafts.length; lotIdx++) {
+      const rows = drafts[lotIdx] || [];
+      if (rows.length < 3) {
+        return {
+          lotIdx,
+          rowIdx: 0,
+          message: `${lotChipLabel(lots[lotIdx] || { corners: [] }, lotIdx)}: needs at least 3 lines.`,
+        };
+      }
+      for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
+        const err = validateCornerRow(rows[rowIdx]);
+        if (err) {
+          return {
+            lotIdx,
+            rowIdx,
+            message: `${lotChipLabel(lots[lotIdx] || { corners: [] }, lotIdx)} · ${formatSurveyLegSheetLabel(
+              rowIdx + 1,
+              rows[rowIdx]?.sheetLineLabel
+            )}: ${err}.`,
+          };
+        }
+      }
+    }
+    return null;
+  }, [drafts, lots]);
+  const canApply = validationIssues.length === 0;
 
   useEffect(() => {
     if (visible && lots.length > 0) {
@@ -92,23 +169,24 @@ export function ScanReviewModal({
   };
 
   const handleApply = () => {
+    if (!canApply) return;
     const out: ScannedLot[] = drafts.map((rows, i) => ({
       lotNo: lots[i]?.lotNo ?? null,
       claimant: lots[i]?.claimant ?? null,
-      corners: rows.map(({ ns, deg, min, ew, distance }) => ({
+      corners: rows.map(({ ns, deg, min, ew, distance, sheetLineLabel }) => ({
         ns,
         deg,
         min,
         ew,
         distance,
+        sheetLineLabel,
       })),
     }));
     onApply(out);
     onDismiss();
   };
 
-  const lineLabel = (idx: number) =>
-    idx === 0 && meta?.tiePointReference ? 'Line 1 · tie → C1' : `Line ${idx + 1}`;
+  const lineLabel = (idx: number) => formatSurveyLegSheetLabel(idx + 1, draft[idx]?.sheetLineLabel);
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onDismiss}>
@@ -146,12 +224,47 @@ export function ScanReviewModal({
             </View>
           ) : null}
 
+          {validationIssues.length > 0 ? (
+            <View style={[styles.warnBox, { backgroundColor: colors.cardBg, borderColor: colors.warning, borderWidth: 2 }]}>
+              <View style={styles.warnBulletRow}>
+                <Text style={[styles.warnBullet, { color: colors.warning }]}>!</Text>
+                <Text style={[styles.warnText, { color: colors.text, fontWeight: '700' }]}>
+                  Fix these issues before tapping OK.
+                </Text>
+              </View>
+              {validationIssues.map((w, i) => (
+                <View key={`v-${i}`} style={styles.warnBulletRow}>
+                  <Text style={[styles.warnBullet, { color: colors.warning }]}>•</Text>
+                  <Text style={[styles.warnText, { color: colors.text }]}>{w}</Text>
+                </View>
+              ))}
+              {firstInvalid ? (
+                <TouchableOpacity
+                  style={[styles.jumpInvalidBtn, { borderColor: colors.warning, backgroundColor: colors.contentBg }]}
+                  onPress={() => {
+                    setSelectedLotIdx(firstInvalid.lotIdx);
+                    setIsEditing(true);
+                  }}
+                >
+                  <Ionicons name="arrow-down-circle-outline" size={18} color={colors.warning} />
+                  <Text style={[styles.jumpInvalidBtnText, { color: colors.text }]}>
+                    Jump to first invalid line ({lotChipLabel(lots[firstInvalid.lotIdx] || { corners: [] }, firstInvalid.lotIdx)} ·{' '}
+                    {formatSurveyLegSheetLabel(
+                      firstInvalid.rowIdx + 1,
+                      drafts[firstInvalid.lotIdx]?.[firstInvalid.rowIdx]?.sheetLineLabel
+                    )})
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : null}
+
           {lots.length > 1 ? (
             <View style={[styles.multiLotBanner, { backgroundColor: colors.contentBg, borderColor: colors.primary }]}>
               <Ionicons name="layers-outline" size={22} color={colors.primary} style={{ marginRight: 10 }} />
               <Text style={[styles.multiLotBannerText, { color: colors.text }]}>
-                {lots.length} lots in this image. Pick a tab below — for each lot, line 1 is{' '}
-                <Text style={{ fontWeight: '800' }}>MON → corner 1</Text> (may differ per lot).
+                {lots.length} lots in this image. Pick a tab below — row 1 is always{' '}
+                <Text style={{ fontWeight: '800' }}>MON → corner 1</Text>; sheet LINE 1-2 starts at row 2.
               </Text>
             </View>
           ) : null}
@@ -195,7 +308,8 @@ export function ScanReviewModal({
                 {meta.tiePointReference}
               </Text>
               <Text style={[styles.tieDocHint, { color: colors.textMuted }]}>
-                For the selected lot, line 1 is the bearing and distance from this monument to corner 1.
+                Row 1 = that monument to corner 1. Row 2 matches the first value under LINE 1-2 on the sheet (not “line 1”
+                there—the sheet’s LINE 1-2 starts after MON. TO CORNER 1).
               </Text>
             </View>
           ) : null}
@@ -235,7 +349,7 @@ export function ScanReviewModal({
               <View style={styles.editModeBannerText}>
                 <Text style={[styles.editModeBannerTitle, { color: colors.text }]}>Editing traverse lines</Text>
                 <Text style={[styles.editModeBannerSub, { color: colors.textMuted }]}>
-                  Fields shrink on narrow screens. Use Preview to verify how values read.
+                  Fields shrink on narrow screens. LOT DESCRIPTIONS: row 1 is MON→C1 only; LINE 1-2 begins at row 2.
                 </Text>
               </View>
             </View>
@@ -248,9 +362,13 @@ export function ScanReviewModal({
                 styles.rowCard,
                 { backgroundColor: colors.cardBg, borderColor: colors.border },
                 isEditing && { borderLeftWidth: 3, borderLeftColor: colors.primary },
+                selectedLotRowErrors[idx] && { borderColor: colors.warning, borderWidth: 2 },
               ]}
             >
               <Text style={[styles.lineBadge, { color: colors.textMuted }]}>{lineLabel(idx)}</Text>
+              {selectedLotRowErrors[idx] ? (
+                <Text style={[styles.inlineErrorText, { color: colors.warning }]}>{selectedLotRowErrors[idx]}</Text>
+              ) : null}
 
               {!isEditing ? (
                 <View style={styles.previewRow}>
@@ -412,8 +530,10 @@ export function ScanReviewModal({
                 styles.btnPrimary,
                 compact && styles.btnPrimaryFull,
                 { backgroundColor: colors.primary },
+                !canApply && styles.btnDisabled,
               ]}
               onPress={handleApply}
+              disabled={!canApply}
             >
               <Text style={styles.btnPrimaryText}>OK — use values</Text>
             </TouchableOpacity>
@@ -451,6 +571,22 @@ const styles = StyleSheet.create({
   warnBulletRow: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 8 },
   warnBullet: { fontSize: 16, lineHeight: 22, marginRight: 8, fontWeight: '700' },
   warnText: { flex: 1, fontSize: 14, lineHeight: 21 },
+  jumpInvalidBtn: {
+    marginTop: 10,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingVertical: 9,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  jumpInvalidBtnText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
   multiLotBanner: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -522,6 +658,12 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   lineBadge: { fontSize: 12, fontWeight: '700', marginBottom: 10, letterSpacing: 0.2 },
+  inlineErrorText: {
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: -2,
+    marginBottom: 8,
+  },
   previewRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -670,4 +812,5 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   btnPrimaryText: { color: '#fff', fontSize: 15, fontWeight: '800' },
+  btnDisabled: { opacity: 0.45 },
 });

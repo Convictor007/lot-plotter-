@@ -109,6 +109,7 @@ export async function POST(req: ExpoRequest) {
           min: c.min,
           ew: c.ew,
           distance: c.distance,
+          sheetLineLabel: c.sheetLineLabel,
         })),
       })),
       tiePointReference,

@@ -19,6 +19,7 @@ export type ParsedCornerRow = {
   min: string;
   ew: string;
   distance: string;
+  sheetLineLabel?: string;
 };
 
 export type ParseSurveyResult = {
@@ -50,9 +51,17 @@ export function collectOcrLines(page: TesseractPage): string[] {
     .filter(Boolean);
 }
 
-/** Normalize common OCR noise before pattern matching. */
+/**
+ * Normalize common OCR noise before pattern matching.
+ * Line breaks inside a table cell (stacked bearing/distance pairs) become spaces so
+ * multiple legs in one column can be parsed in order.
+ */
 export function normalizeBearingLine(line: string): string {
   return line
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[\u2028\u2029]/g, '\n')
+    .replace(/\n+/g, ' ')
     .replace(/\t+/g, ' ')
     .replace(/\u00b0/g, ' ')
     .replace(/[\u2018\u2019\u2032\u2033]/g, "'")
@@ -115,6 +124,17 @@ function normalizeQuadrantEW(raw: string): 'E' | 'W' | null {
   return null;
 }
 
+function normalizeSheetLineLabel(raw: unknown): string | undefined {
+  if (raw == null) return undefined;
+  const src = String(raw).trim();
+  if (!src) return undefined;
+  const compact = src.replace(/\s+/g, '');
+  if (/^(mon(\.|ument)?(to)?corner1|mon→c1|mon->c1)$/i.test(compact)) return 'MON→C1';
+  const m = compact.match(/^(?:line)?(\d{1,2})[-–](\d{1,2})$/i);
+  if (!m) return undefined;
+  return `${parseInt(m[1], 10)}-${parseInt(m[2], 10)}`;
+}
+
 /** Normalize LLM / JSON output into a validated corner row (or null). */
 export function toValidatedCorner(
   ns: unknown,
@@ -122,7 +142,8 @@ export function toValidatedCorner(
   min: unknown,
   ew: unknown,
   distance: unknown,
-  line: number
+  line: number,
+  sheetLineLabel?: unknown
 ): ParsedCornerRow | null {
   const nsU = normalizeQuadrantNS(String(ns ?? ''));
   const ewU = normalizeQuadrantEW(String(ew ?? ''));
@@ -149,6 +170,7 @@ export function toValidatedCorner(
     min: String(minN),
     ew: ewU,
     distance: distanceStr,
+    sheetLineLabel: normalizeSheetLineLabel(sheetLineLabel),
   };
 }
 
@@ -196,7 +218,15 @@ export function normalizeOllamaCornersPayload(payload: unknown): ParsedCornerRow
   for (const row of corners) {
     if (!row || typeof row !== 'object') continue;
     const r = row as Record<string, unknown>;
-    const v = toValidatedCorner(r.ns, r.deg, r.min, r.ew, r.distance, line++);
+    const v = toValidatedCorner(
+      r.ns,
+      r.deg,
+      r.min,
+      r.ew,
+      r.distance,
+      line++,
+      r.sheetLineLabel ?? r.sheet_line_label ?? r.lineLabel ?? r.line_label ?? r.line
+    );
     if (v) out.push(v);
   }
   return out.map((c, i) => ({ ...c, line: i + 1 }));
@@ -242,7 +272,15 @@ export function normalizeOllamaLotsPayload(payload: unknown): {
       for (const row of cornersArr) {
         if (!row || typeof row !== 'object') continue;
         const r = row as Record<string, unknown>;
-        const v = toValidatedCorner(r.ns, r.deg, r.min, r.ew, r.distance, line++);
+        const v = toValidatedCorner(
+          r.ns,
+          r.deg,
+          r.min,
+          r.ew,
+          r.distance,
+          line++,
+          r.sheetLineLabel ?? r.sheet_line_label ?? r.lineLabel ?? r.line_label ?? r.line
+        );
         if (v) corners.push(v);
       }
       const fixedCorners = corners.map((c, i) => ({ ...c, line: i + 1 }));
@@ -274,23 +312,27 @@ export function normalizeOllamaLotsPayload(payload: unknown): {
   };
 }
 
-/**
- * Try to match one survey line. Order: strict CSV-like, then spaced DMS.
- */
-function tryParseLine(rawNormalized: string): Omit<ParsedCornerRow, 'line'> | null {
-  const normalized = fixSplitDecimalDistance(rawNormalized);
-  /** Trailing text after distance is common in OCR; avoid `$` end-anchors. */
-  const patterns: RegExp[] = [
-    /^([NS])[.\s,]+(\d{1,2})[.\s,]+(\d{1,2})[.\s,]+([EW])[.\s,]+([\d,\.]+)/i,
-    /^([NS])\s*[,;]\s*(\d{1,2})\s*[,;]\s*(\d{1,2})\s*[,;]\s*([EW])\s*[,;]\s*([\d,\.]+)/i,
-    /([NS])[.\s,]+(\d{1,2})[.\s,°']+(\d{1,2})[.\s,°']+([EW])[.\s,]+([\d,\.]+)/i,
-    /** Noisy OCR: allow junk between fields (bounded). */
-    /([NS])[^\dNS]{0,12}(\d{1,2})[^\d]{0,8}(\d{1,2})[^\d]{0,8}([EW])[^\d]{0,10}([\d,\.]+)/i,
-  ];
+/** Patterns must match at the **current** start of the string (after trim) for multi-segment lines. */
+const BEARING_AT_START_PATTERNS: RegExp[] = [
+  /^([NS])[.\s,]+(\d{1,2})[.\s,]+(\d{1,2})[.\s,]+([EW])[.\s,]+([\d,\.]+)/i,
+  /^([NS])\s*[,;]\s*(\d{1,2})\s*[,;]\s*(\d{1,2})\s*[,;]\s*([EW])\s*[,;]\s*([\d,\.]+)/i,
+  /^[.\s,|/\\-]*([NS])[.\s,]+(\d{1,2})[.\s,°']+(\d{1,2})[.\s,°']+([EW])[.\s,]+([\d,\.]+)/i,
+  /** Noisy OCR: allow junk between fields (bounded). */
+  /^[.\s,|/\\-]*([NS])[^\dNS]{0,12}(\d{1,2})[^\d]{0,8}(\d{1,2})[^\d]{0,8}([EW])[^\d]{0,10}([\d,\.]+)/i,
+];
 
-  for (const re of patterns) {
-    const m = normalized.match(re);
-    if (!m) continue;
+type ParsedCornerFields = Omit<ParsedCornerRow, 'line'>;
+
+/**
+ * First valid quadrant bearing + distance at the start of an already-normalized string.
+ * `matchLen` is always measured on `normalized` so callers can slice the same buffer safely.
+ */
+function tryParseFirstCornerAtNormalizedStart(normalized: string): { row: ParsedCornerFields; matchLen: number } | null {
+  const fixed = fixSplitDecimalDistance(normalized);
+
+  for (const re of BEARING_AT_START_PATTERNS) {
+    const m = re.exec(fixed);
+    if (!m || m.index !== 0) continue;
     const ns = m[1].toUpperCase();
     const ew = m[4].toUpperCase();
     const deg = parseInt(m[2], 10);
@@ -299,14 +341,63 @@ function tryParseLine(rawNormalized: string): Omit<ParsedCornerRow, 'line'> | nu
     const dist = parseFloat(distance);
     if (!isValidBearing(deg, min, dist)) continue;
     return {
-      ns,
-      deg: String(deg),
-      min: String(min),
-      ew,
-      distance,
+      row: {
+        ns,
+        deg: String(deg),
+        min: String(min),
+        ew,
+        distance,
+      },
+      matchLen: m[0].length,
     };
   }
   return null;
+}
+
+/**
+ * All bearing/distance legs read from one table cell: inline stacked pairs, newlines inside the cell,
+ * or multiple quadrant patterns in sequence (real cadastral "LINE x-y" edge case).
+ */
+export function extractBearingSegmentsFromTableCell(raw: string): ParsedCornerFields[] {
+  const out: ParsedCornerFields[] = [];
+  let rest = fixSplitDecimalDistance(normalizeBearingLine(raw)).trim();
+  for (let guard = 0; guard < 24 && rest.length; guard++) {
+    const hit = tryParseFirstCornerAtNormalizedStart(rest);
+    if (!hit) break;
+    out.push(hit.row);
+    rest = rest
+      .slice(hit.matchLen)
+      .replace(/^[\s,;|/\\.-]+/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+  return out;
+}
+
+/**
+ * When Tesseract splits one cell across two lines (e.g. "S56-45W" / "298.75"), joining yields more
+ * valid legs than parsing separately. Does not merge when that would not increase segment count.
+ */
+function mergeSplitBearingOcrLines(lines: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const cur = lines[i];
+    if (i < lines.length - 1) {
+      const next = lines[i + 1];
+      if (!isHeaderOrNoiseLine(cur) && !isHeaderOrNoiseLine(next)) {
+        const sepA = extractBearingSegmentsFromTableCell(cur).length;
+        const sepB = extractBearingSegmentsFromTableCell(next).length;
+        const comb = extractBearingSegmentsFromTableCell(`${cur} ${next}`).length;
+        if (comb > sepA + sepB) {
+          out.push(`${cur} ${next}`.replace(/\s+/g, ' ').trim());
+          i += 1;
+          continue;
+        }
+      }
+    }
+    out.push(cur);
+  }
+  return out;
 }
 
 /** Table header / column titles (CSV, Excel export, etc.) */
@@ -351,18 +442,27 @@ export function extractCornersFromFullOcrText(fullText: string): ParsedCornerRow
 
 export function parseSurveyCornersFromOcr(page: TesseractPage): ParseSurveyResult {
   const warnings: string[] = [];
-  const lines = collectOcrLines(page).map(normalizeBearingLine).filter(Boolean);
+  const rawLines = collectOcrLines(page).map(normalizeBearingLine).filter(Boolean);
+  const lines = mergeSplitBearingOcrLines(rawLines);
 
   let corners: ParsedCornerRow[] = [];
   let lineNo = 1;
+  let stackedCellCount = 0;
 
   for (const raw of lines) {
     if (isHeaderOrNoiseLine(raw)) continue;
 
-    const parsed = tryParseLine(raw);
-    if (parsed) {
+    const segments = extractBearingSegmentsFromTableCell(raw);
+    if (segments.length > 1) stackedCellCount += 1;
+    for (const parsed of segments) {
       corners.push({ line: lineNo++, ...parsed });
     }
+  }
+
+  if (stackedCellCount > 0) {
+    warnings.push(
+      `Detected ${stackedCellCount} line(s) with multiple bearing/distance pairs (multi-line or stacked table cells); included all segments in traverse order. Verify against the document.`
+    );
   }
 
   if (corners.length === 0 && page.text.trim()) {

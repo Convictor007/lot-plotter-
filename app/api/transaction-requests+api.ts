@@ -60,7 +60,7 @@ export async function POST(req: Request) {
       user_id: auth.userId,
       reference_number,
       type: body.type,
-      status: (body.status as TransactionStatus) || 'submitted',
+      status: (body.status as TransactionStatus) || 'pending',
       notes: notesPayload,
     });
 

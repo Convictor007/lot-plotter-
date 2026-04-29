@@ -33,7 +33,7 @@ export type GeocodedAddressPreview = {
   formatted?: string | null;
 };
 
-function buildMapHtml(lat: number, lng: number, pinColor: string) {
+function buildLeafletHtml(lat: number, lng: number, pinColor: string) {
   const pin = pinColor && /^#[0-9A-Fa-f]{6}$/.test(pinColor) ? pinColor : '#3b5998';
   return `<!DOCTYPE html><html><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
@@ -68,12 +68,13 @@ function buildMapHtml(lat: number, lng: number, pinColor: string) {
   }
   #basemap-bar .basemap-lbl{display:none;}
   #basemap-bar button{
-    border:none;padding:4px 2px;margin:0;background:transparent;color:#222;
-    font-size:11px;font-weight:600;cursor:pointer;-webkit-tap-highlight-color:transparent;white-space:nowrap;
-    text-decoration:none;opacity:.75;
+    border:none;padding:4px 6px;margin:0;background:rgba(255,255,255,.86);color:#c1121f;
+    font-size:11px;font-weight:700;cursor:pointer;-webkit-tap-highlight-color:transparent;white-space:nowrap;
+    text-decoration:none;opacity:1;border-radius:6px;
   }
-  #basemap-bar button.on{opacity:1;font-weight:800;color:#1a56b8;text-decoration:underline;text-underline-offset:3px;}
-  #basemap-bar button:active{opacity:.55;}
+  #basemap-bar button:hover{background:#fff;color:#8b0000;box-shadow:0 1px 6px rgba(0,0,0,.2);}
+  #basemap-bar button.on{font-weight:800;color:#fff;background:#c1121f;text-decoration:none;}
+  #basemap-bar button:active{opacity:.85;}
 </style>
 </head><body>
 <div id="map-root">
@@ -169,6 +170,100 @@ function buildMapHtml(lat: number, lng: number, pinColor: string) {
 </script></body></html>`;
 }
 
+function buildMapboxHtml(lat: number, lng: number, pinColor: string, token: string) {
+  const pin = pinColor && /^#[0-9A-Fa-f]{6}$/.test(pinColor) ? pinColor : '#3b5998';
+  return `<!DOCTYPE html><html><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet"/>
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
+<style>
+  html,body{margin:0;padding:0;height:100%;width:100%;}
+  #map-root{position:relative;width:100%;height:100%;}
+  #map{position:absolute;inset:0;}
+  .pin-stack{position:absolute;left:50%;top:50%;z-index:1000;pointer-events:none;transform:translate(-50%,-100%);display:flex;flex-direction:column;align-items:center;margin-top:-6px;}
+  .addr-tooltip{position:relative;background:${pin};color:#fff;font-size:12px;font-weight:600;padding:8px 14px;border-radius:10px;margin-bottom:4px;max-width:min(280px,calc(100vw - 48px));text-align:center;line-height:1.35;box-shadow:0 2px 10px rgba(0,0,0,.22);font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
+  .addr-tooltip::after{content:'';position:absolute;left:50%;bottom:-7px;transform:translateX(-50%);border-width:7px 7px 0 7px;border-style:solid;border-color:${pin} transparent transparent transparent;}
+  .center-pin svg{display:block;width:40px;height:48px;filter:drop-shadow(0 2px 4px rgba(0,0,0,.35));}
+  #basemap-bar{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);z-index:1000;display:flex;flex-wrap:wrap;gap:2px 8px;justify-content:center;align-items:center;max-width:calc(100% - 64px);padding:0 6px;background:transparent;border-radius:0;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
+  #basemap-bar button{border:none;padding:4px 6px;margin:0;background:rgba(255,255,255,.86);color:#c1121f;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;text-decoration:none;opacity:1;border-radius:6px;}
+  #basemap-bar button:hover{background:#fff;color:#8b0000;box-shadow:0 1px 6px rgba(0,0,0,.2);}
+  #basemap-bar button.on{font-weight:800;color:#fff;background:#c1121f;text-decoration:none;}
+</style>
+</head><body>
+<div id="map-root"><div id="map"></div>
+<div class="pin-stack" aria-hidden="true"><div class="addr-tooltip">Your address is here</div><div class="center-pin"><svg viewBox="0 0 24 36" xmlns="http://www.w3.org/2000/svg"><path fill="${pin}" d="M12 0C7.58 0 4 3.58 4 8c0 7 8 18 8 18s8-11 8-18c0-4.42-3.58-8-8-8z"/><circle fill="#fff" cx="12" cy="8" r="3.2"/></svg></div></div>
+<div id="basemap-bar" aria-label="Map style"></div></div>
+<script>
+(function(){
+  mapboxgl.accessToken=${JSON.stringify(token)};
+  var map=new mapboxgl.Map({container:'map',style:'mapbox://styles/mapbox/streets-v12',center:[${lng},${lat}],zoom:17});
+  map.addControl(new mapboxgl.NavigationControl(),'top-left');
+  var bar=document.getElementById('basemap-bar');
+  var styles={streets:'mapbox://styles/mapbox/streets-v12',satellite:'mapbox://styles/mapbox/satellite-v9',hybrid:'mapbox://styles/mapbox/satellite-streets-v12',light:'mapbox://styles/mapbox/light-v11',dark:'mapbox://styles/mapbox/dark-v11'};
+  [['streets','Map'],['satellite','Satellite'],['hybrid','Hybrid'],['light','Light'],['dark','Dark']].forEach(function(s){
+    var b=document.createElement('button');b.type='button';b.textContent=s[1];b.setAttribute('data-mode',s[0]);if(s[0]==='streets') b.className='on';
+    b.onclick=function(){ map.setStyle(styles[s[0]]); bar.querySelectorAll('button').forEach(function(el){ el.classList.toggle('on', el.getAttribute('data-mode')===s[0]); }); };
+    bar.appendChild(b);
+  });
+  function send(){ var c=map.getCenter(); var payload={lat:c.lat,lng:c.lng}; if(window.ReactNativeWebView){ window.ReactNativeWebView.postMessage(JSON.stringify(payload)); } else if(window.parent&&window.parent!==window){ window.parent.postMessage(Object.assign({type:'${WEB_MAP_MESSAGE_TYPE}'},payload),'*'); } }
+  map.on('moveend',send); map.on('zoomend',send); map.on('load',function(){ setTimeout(send,120); });
+  window.iassessLocateMe=function(){ if(!navigator.geolocation)return; navigator.geolocation.getCurrentPosition(function(pos){ map.flyTo({center:[pos.coords.longitude,pos.coords.latitude],zoom:17}); setTimeout(send,250); },function(){},{enableHighAccuracy:true,maximumAge:60000,timeout:15000}); };
+})();
+</script></body></html>`;
+}
+
+function buildGoogleHtml(lat: number, lng: number, pinColor: string, key: string) {
+  const pin = pinColor && /^#[0-9A-Fa-f]{6}$/.test(pinColor) ? pinColor : '#3b5998';
+  return `<!DOCTYPE html><html><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<style>
+html,body,#map-root,#map{margin:0;padding:0;height:100%;width:100%} #map-root{position:relative}
+.pin-stack{position:absolute;left:50%;top:50%;z-index:1000;pointer-events:none;transform:translate(-50%,-100%);display:flex;flex-direction:column;align-items:center;margin-top:-6px}
+.addr-tooltip{position:relative;background:${pin};color:#fff;font-size:12px;font-weight:600;padding:8px 14px;border-radius:10px;margin-bottom:4px;max-width:min(280px,calc(100vw - 48px));text-align:center;line-height:1.35;box-shadow:0 2px 10px rgba(0,0,0,.22);font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+.addr-tooltip::after{content:'';position:absolute;left:50%;bottom:-7px;transform:translateX(-50%);border-width:7px 7px 0 7px;border-style:solid;border-color:${pin} transparent transparent transparent}
+.center-pin svg{display:block;width:40px;height:48px;filter:drop-shadow(0 2px 4px rgba(0,0,0,.35))}
+#basemap-bar{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);z-index:1000;display:flex;gap:8px;max-width:calc(100% - 64px);font-family:system-ui}
+#basemap-bar button{border:none;padding:4px 6px;background:rgba(255,255,255,.86);color:#c1121f;font-size:11px;font-weight:700;opacity:1;border-radius:6px}
+#basemap-bar button:hover{background:#fff;color:#8b0000;box-shadow:0 1px 6px rgba(0,0,0,.2)}
+#basemap-bar button.on{font-weight:800;color:#fff;background:#c1121f;text-decoration:none}
+</style></head><body>
+<div id="map-root"><div id="map"></div>
+<div class="pin-stack" aria-hidden="true"><div class="addr-tooltip">Your address is here</div><div class="center-pin"><svg viewBox="0 0 24 36" xmlns="http://www.w3.org/2000/svg"><path fill="${pin}" d="M12 0C7.58 0 4 3.58 4 8c0 7 8 18 8 18s8-11 8-18c0-4.42-3.58-8-8-8z"/><circle fill="#fff" cx="12" cy="8" r="3.2"/></svg></div></div>
+<div id="basemap-bar"></div></div>
+<script>
+var map;
+function send(){ if(!map) return; var c=map.getCenter(); var payload={lat:c.lat(),lng:c.lng()}; if(window.ReactNativeWebView){window.ReactNativeWebView.postMessage(JSON.stringify(payload));} else if(window.parent&&window.parent!==window){window.parent.postMessage(Object.assign({type:'${WEB_MAP_MESSAGE_TYPE}'},payload),'*');} }
+function initMap(){
+  map=new google.maps.Map(document.getElementById('map'),{center:{lat:${lat},lng:${lng}},zoom:17,mapTypeId:'roadmap',streetViewControl:false,fullscreenControl:false});
+  map.addListener('idle',send);
+  var bar=document.getElementById('basemap-bar');
+  [['roadmap','Map'],['satellite','Satellite'],['hybrid','Hybrid'],['terrain','Terrain']].forEach(function(s){
+    var b=document.createElement('button'); b.textContent=s[1]; b.className=s[0]==='roadmap'?'on':'';
+    b.onclick=function(){ map.setMapTypeId(s[0]); bar.querySelectorAll('button').forEach(function(el){el.classList.remove('on')}); b.classList.add('on'); };
+    bar.appendChild(b);
+  });
+  setTimeout(send,120);
+}
+window.iassessLocateMe=function(){ if(!navigator.geolocation||!map)return; navigator.geolocation.getCurrentPosition(function(pos){ map.panTo({lat:pos.coords.latitude,lng:pos.coords.longitude}); map.setZoom(17); setTimeout(send,250); },function(){},{enableHighAccuracy:true,maximumAge:60000,timeout:15000}); };
+</script>
+<script async defer src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&callback=initMap"></script>
+</body></html>`;
+}
+
+function buildMapHtml(
+  lat: number,
+  lng: number,
+  pinColor: string,
+  googleApiKey?: string | null,
+  mapboxToken?: string | null
+) {
+  const g = (googleApiKey || '').trim();
+  if (g) return buildGoogleHtml(lat, lng, pinColor, g);
+  const m = (mapboxToken || '').trim();
+  if (m) return buildMapboxHtml(lat, lng, pinColor, m);
+  return buildLeafletHtml(lat, lng, pinColor);
+}
+
 export type AddressMapPickerModalProps = {
   visible: boolean;
   onClose: () => void;
@@ -237,6 +332,12 @@ export function AddressMapPickerModal({
 
   const startLat = Number.isFinite(initialLat as number) ? (initialLat as number) : DEFAULT_LAT;
   const startLng = Number.isFinite(initialLng as number) ? (initialLng as number) : DEFAULT_LNG;
+  const googleApiKey = (process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || '').trim();
+  const mapboxToken = (
+    process.env.EXPO_PUBLIC_MAPBOX_ACCESS_TOKEN ||
+    process.env.EXPO_PUBLIC_MAPBOX_TOKEN ||
+    ''
+  ).trim();
 
   const [draftLat, setDraftLat] = useState(startLat);
   const [draftLng, setDraftLng] = useState(startLng);
@@ -260,7 +361,10 @@ export function AddressMapPickerModal({
     }
   }, [visible, startLat, startLng]);
 
-  const html = useMemo(() => buildMapHtml(startLat, startLng, colors.primary), [startLat, startLng, colors.primary]);
+  const html = useMemo(
+    () => buildMapHtml(startLat, startLng, colors.primary, googleApiKey, mapboxToken),
+    [startLat, startLng, colors.primary, googleApiKey, mapboxToken]
+  );
 
   const onMessage = useCallback((e: { nativeEvent: { data: string } }) => {
     applyPinPayload(e.nativeEvent.data, setDraftLat, setDraftLng);
@@ -444,11 +548,12 @@ export function AddressMapPickerModal({
             ]}
           >
             <TouchableOpacity
-              style={[styles.confirmBtn, { backgroundColor: colors.primary }]}
+              style={[styles.confirmBtn, { backgroundColor: colors.primary }, geocodeBusy && styles.confirmBtnDisabled]}
               onPress={handleConfirm}
+              disabled={geocodeBusy}
               activeOpacity={0.9}
             >
-              <Text style={styles.confirmBtnText}>Confirm</Text>
+              <Text style={styles.confirmBtnText}>{geocodeBusy ? 'Fetching address...' : 'Confirm'}</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -563,4 +668,5 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
   },
   confirmBtnText: { color: '#fff', fontSize: 16, fontWeight: '700', lineHeight: 20 },
+  confirmBtnDisabled: { opacity: 0.6 },
 });

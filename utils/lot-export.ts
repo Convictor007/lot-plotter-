@@ -13,6 +13,7 @@ import {
   buildLotMapOverlaySvg,
   computeStaticMapView,
 } from '@/utils/lot-pdf-map';
+import { formatSurveyLegSheetLabel } from '@/utils/survey-leg-label';
 
 const COMPASS_PNG = require('../assets/images/compass1.png');
 
@@ -45,9 +46,11 @@ async function getCompassPngDataUri(): Promise<string | null> {
 
 export type LotCornerRow = {
   line: number;
+  sheetLineLabel?: string;
   ns: string;
   deg: string;
   min: string;
+  sec?: string;
   ew: string;
   distance: string;
 };
@@ -106,19 +109,27 @@ export function isLotExportable(corners: LotCornerRow[], polygon: LotPolygonExpo
     if (!Number.isFinite(dist) || dist <= 0) return false;
     const deg = parseInt(c.deg, 10);
     const min = parseInt(c.min, 10);
+    const sec = c.sec?.trim() ? parseInt(c.sec, 10) : 0;
     if (!Number.isFinite(deg) || deg < 0 || deg > 90) return false;
     if (!Number.isFinite(min) || min < 0 || min > 59) return false;
+    if (!Number.isFinite(sec) || sec < 0 || sec > 59) return false;
     if (c.ns !== 'N' && c.ns !== 'S') return false;
     if (c.ew !== 'E' && c.ew !== 'W') return false;
   }
   return true;
 }
 
+function csvCell(raw: string): string {
+  const s = raw.replace(/\r\n/g, '\n');
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
 export function buildLotTraverseCsv(corners: LotCornerRow[]): string {
-  const header = 'Line,NS,Deg,Min,EW,Distance_m';
+  const header = 'LINE,NS,Deg,Min,EW,Distance_m';
   const rows = corners.map(
     (c) =>
-      `${c.line},${c.ns},${c.deg},${c.min},${c.ew},${c.distance.replace(/,/g, '.')}`
+      `${csvCell(formatSurveyLegSheetLabel(c.line, c.sheetLineLabel))},${c.ns},${c.deg},${c.min},${c.ew},${c.distance.replace(/,/g, '.')}`
   );
   return [header, ...rows].join('\r\n');
 }
@@ -210,7 +221,7 @@ function buildPdfHtml(
   const rowsHtml = corners
     .map(
       (c) => `<tr>
-      <td>${c.line}</td>
+      <td>${escapeHtml(formatSurveyLegSheetLabel(c.line, c.sheetLineLabel))}</td>
       <td>${escapeHtml(c.ns)}</td>
       <td>${escapeHtml(c.deg)}</td>
       <td>${escapeHtml(c.min)}</td>
@@ -297,7 +308,7 @@ function buildPdfHtml(
   ${mapSection}
   <h2>Traverse lines (bearings & distances)</h2>
   <table>
-    <thead><tr><th>Line</th><th>NS</th><th>Deg</th><th>Min</th><th>EW</th><th>Dist (m)</th><th>Bearing</th></tr></thead>
+    <thead><tr><th>LINE</th><th>NS</th><th>Deg</th><th>Min</th><th>EW</th><th>Dist (m)</th><th>Bearing</th></tr></thead>
     <tbody>${rowsHtml}</tbody>
   </table>
   ${statsRow}

@@ -88,6 +88,11 @@ interface MapModalProps {
     color?: string;
     fillColor?: string;
   } | null;
+  polygons?: Array<{
+    coordinates: [number, number][];
+    color?: string;
+    fillColor?: string;
+  }> | null;
   area?: number;
   showAreaLabel?: boolean;
   showMapControls?: boolean;
@@ -103,6 +108,7 @@ const MapModal = forwardRef<MapModalHandle, MapModalProps>(function MapModal(
     center,
     zoom = 17,
     polygon,
+    polygons,
     area,
     showAreaLabel = true,
     showMapControls = true,
@@ -180,6 +186,13 @@ const MapModal = forwardRef<MapModalHandle, MapModalProps>(function MapModal(
         fillColor: polyColor,
       }
     : null;
+  const hasMultiPolygons = Boolean(polygons && polygons.length > 0);
+  const mapPolygons =
+    polygons?.map((p) => ({
+      coordinates: p.coordinates,
+      color: p.color || polyColor,
+      fillColor: p.fillColor || p.color || polyColor,
+    })) || null;
 
   const mapBoundary = balatanBoundary
     ? {
@@ -215,18 +228,20 @@ const MapModal = forwardRef<MapModalHandle, MapModalProps>(function MapModal(
               Lot Plot - GIS Map
             </Text>
 
-            <TouchableOpacity
-              onPress={() => setIsCompareMode(!isCompareMode)}
-              style={[styles.historicalBtn, compactMapHeader && styles.historicalBtnCompact]}
-              accessibilityLabel={isCompareMode ? 'View normal map' : 'Historical compare'}
-            >
-              <Ionicons name={isCompareMode ? 'map' : 'swap-horizontal'} size={18} color={COLORS.text} />
-              {!compactMapHeader ? (
-                <Text style={[styles.historicalBtnText, { marginLeft: 6 }]}>
-                  {isCompareMode ? 'View Normal Map' : 'Historical Compare'}
-                </Text>
-              ) : null}
-            </TouchableOpacity>
+            {!hasMultiPolygons ? (
+              <TouchableOpacity
+                onPress={() => setIsCompareMode(!isCompareMode)}
+                style={[styles.historicalBtn, compactMapHeader && styles.historicalBtnCompact]}
+                accessibilityLabel={isCompareMode ? 'View normal map' : 'Historical compare'}
+              >
+                <Ionicons name={isCompareMode ? 'map' : 'swap-horizontal'} size={18} color={COLORS.text} />
+                {!compactMapHeader ? (
+                  <Text style={[styles.historicalBtnText, { marginLeft: 6 }]}>
+                    {isCompareMode ? 'View Normal Map' : 'Historical Compare'}
+                  </Text>
+                ) : null}
+              </TouchableOpacity>
+            ) : null}
           </View>
           <View style={styles.headerRight}>
             {exportPdfEnabled && onExportPdfFromMap ? (
@@ -285,7 +300,7 @@ const MapModal = forwardRef<MapModalHandle, MapModalProps>(function MapModal(
 
         <View style={styles.mapWrapper}>
           <View ref={mapCaptureRef} style={styles.mapCaptureShell} collapsable={false}>
-            {isCompareMode ? (
+            {isCompareMode && !hasMultiPolygons ? (
               <ArcGISCompareMap
                 center={latestCenterRef.current}
                 zoom={latestZoomRef.current}
@@ -300,6 +315,7 @@ const MapModal = forwardRef<MapModalHandle, MapModalProps>(function MapModal(
                 center={latestCenterRef.current}
                 zoom={latestZoomRef.current}
                 polygon={mapPolygon}
+                polygons={mapPolygons}
                 boundary={mapBoundary}
                 boundaryGeoJson={balatanBarangaysGeoJson}
                 style={styles.map}

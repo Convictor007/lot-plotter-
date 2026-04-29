@@ -6,6 +6,7 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
+  Image,
   Modal,
   Platform,
   ScrollView,
@@ -33,6 +34,7 @@ import {
   type LotPolygonExport,
   type LotTieContext,
 } from '@/utils/lot-export';
+import { formatSurveyLegSheetLabel } from '@/utils/survey-leg-label';
 
 import { useTheme } from '@/contexts/ThemeContext';
 
@@ -43,9 +45,16 @@ import { useTheme } from '@/contexts/ThemeContext';
 interface Corner {
   id: string;
   line: number;
+  sheetLineLabel?: string;
+  segmentType?: 'line' | 'curve';
+  curveRadius?: string;
+  curveDelta?: string;
+  curveChord?: string;
+  curveDirection?: 'L' | 'R';
   ns: string;
   deg: string;
   min: string;
+  sec?: string;
   ew: string;
   distance: string;
 }
@@ -57,6 +66,17 @@ interface ImportedLotSlot {
   claimant: string | null;
   corners: Corner[];
 }
+
+const MULTI_POLYGON_COLORS = [
+  '#3b5998',
+  '#2563eb',
+  '#16a34a',
+  '#facc15',
+  '#ef4444',
+  '#d97706',
+  '#9333ea',
+  '#dc2626',
+];
 
 export default function LotPlotterScreen() {
   const insets = useSafeAreaInsets();
@@ -86,6 +106,10 @@ export default function LotPlotterScreen() {
   const [activeImportedLotIndex, setActiveImportedLotIndex] = useState(0);
   const [pendingScanLabel, setPendingScanLabel] = useState<string | null>(null);
   const [isOcrProcessing, setIsOcrProcessing] = useState(false);
+  const [ocrProgress, setOcrProgress] = useState(0);
+  /** Preview selected image before OCR analyze; user must confirm first. */
+  const [pendingImageUri, setPendingImageUri] = useState<string | null>(null);
+  const [pendingImageSource, setPendingImageSource] = useState<'camera' | 'gallery' | null>(null);
   /** Monument / BLLM text extracted from the last successful AI scan (for cross-check with map tie point). */
   const [documentTieFromScan, setDocumentTieFromScan] = useState<string | null>(null);
   /** After scan apply: user-visible hint for catalog tie auto-match (or manual pick reminder). */
@@ -101,11 +125,15 @@ export default function LotPlotterScreen() {
     municipality: string;
     tieId: string;
   } | null>(null);
+  const ocrAbortRef = useRef<AbortController | null>(null);
+  const ocrProgressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [corners, setCorners] = useState<Corner[]>([]);
+  const [bearingCorrection, setBearingCorrection] = useState('0');
   const [polygon, setPolygon] = useState<any>(null);
   const [center, setCenter] = useState({ lat: 13.3155, lng: 123.2328 });
   const [showMap, setShowMap] = useState(false);
+  const [showAllMap, setShowAllMap] = useState(false);
 
   useEffect(() => {
     const provs = tiepointsService.getProvinces();
@@ -200,9 +228,11 @@ export default function LotPlotterScreen() {
     );
   }, [tiePoints, pickerSearch]);
 
-  const formatBearing = (ns: string, deg: string, min: string, ew: string): string => {
+  const formatBearing = (ns: string, deg: string, min: string, ew: string, sec?: string): string => {
     const d = deg.padStart(2, '0');
     const m = min.padStart(2, '0');
+    const s = (sec || '').trim();
+    if (s) return `${ns} ${d}° ${m}' ${s}" ${ew}`;
     return `${ns} ${d}° ${m}' ${ew}`;
   };
 
@@ -222,6 +252,44 @@ export default function LotPlotterScreen() {
     generatePolygon(updatedCorners);
   };
 
+  const renumberCorners = (rows: Corner[]): Corner[] =>
+    rows.map((c, idx) => ({
+      ...c,
+      line: idx + 1,
+    }));
+
+  const addSubcornerAfter = (id: string) => {
+    setCorners((prev) => {
+      const idx = prev.findIndex((c) => c.id === id);
+      if (idx < 0) return prev;
+      const anchor = prev[idx];
+      // Freeze currently visible labels so insertion does not relabel existing rows unexpectedly.
+      const frozen = prev.map((c) => ({
+        ...c,
+        sheetLineLabel: c.sheetLineLabel ?? formatSurveyLegSheetLabel(c.line),
+      }));
+      const inserted: Corner = {
+        id: `subcorner-${Date.now()}`,
+        line: anchor.line + 1,
+        sheetLineLabel: anchor.sheetLineLabel ?? formatSurveyLegSheetLabel(anchor.line),
+        segmentType: anchor.segmentType ?? 'line',
+        curveRadius: anchor.curveRadius,
+        curveDelta: anchor.curveDelta,
+        curveChord: anchor.curveChord,
+        curveDirection: anchor.curveDirection,
+        ns: anchor.ns,
+        deg: anchor.deg,
+        min: anchor.min,
+        sec: anchor.sec,
+        ew: anchor.ew,
+        distance: anchor.distance,
+      };
+      const next = renumberCorners([...frozen.slice(0, idx + 1), inserted, ...frozen.slice(idx + 1)]);
+      generatePolygon(next);
+      return next;
+    });
+  };
+
   const generatePolygon = (cornerPoints: Corner[], tieForComputation?: TiePoint | null) => {
     if (cornerPoints.length < 3) {
       setPolygon(null);
@@ -232,11 +300,17 @@ export default function LotPlotterScreen() {
     const originLat = tp != null ? tp.lat : center.lat;
     const originLng = tp != null ? tp.lon : center.lng;
 
+    const correction = Number.isFinite(parseFloat(bearingCorrection)) ? parseFloat(bearingCorrection) : 0;
     try {
       const boundaries = cornerPoints.map((corner) => ({
         id: corner.id,
-        bearing: formatBearing(corner.ns, corner.deg, corner.min, corner.ew),
+        bearing: formatBearing(corner.ns, corner.deg, corner.min, corner.ew, corner.sec),
         distance: parseFloat(corner.distance) || 0,
+        segmentType: corner.segmentType ?? 'line',
+        curveRadius: parseFloat(corner.curveRadius || '') || undefined,
+        curveDelta: parseFloat(corner.curveDelta || '') || undefined,
+        curveChord: parseFloat(corner.curveChord || '') || undefined,
+        curveDirection: corner.curveDirection,
         isTiePoint: corner.line === 1,
       }));
 
@@ -246,17 +320,19 @@ export default function LotPlotterScreen() {
         boundaries,
         tp?.x,
         tp?.y,
-        tp?.zone
+        tp?.zone,
+        correction
       );
 
-      const { area, perimeter } = gisUtils.calculateLotAreaAndPerimeter(boundaries);
+      const { area, perimeter } = gisUtils.calculateLotAreaAndPerimeterWithBearingOffset(boundaries, correction);
       const closureCheck = gisUtils.checkClosureError(
         boundaries,
         originLat,
         originLng,
         tp?.x,
         tp?.y,
-        tp?.zone
+        tp?.zone,
+        correction
       );
 
       setPolygon({
@@ -272,17 +348,14 @@ export default function LotPlotterScreen() {
   };
 
   const deleteCorner = (id: string) => {
-    const updated = corners.filter((c) => c.id !== id).map((c, idx) => ({
-      ...c,
-      line: idx + 1,
-    }));
+    const updated = renumberCorners(corners.filter((c) => c.id !== id));
     setCorners(updated);
     generatePolygon(updated);
   };
 
   const updateCorner = (
     id: string,
-    patch: Partial<Pick<Corner, 'ns' | 'deg' | 'min' | 'ew' | 'distance'>>
+    patch: Partial<Pick<Corner, 'sheetLineLabel' | 'ns' | 'deg' | 'min' | 'sec' | 'ew' | 'distance'>>
   ) => {
     setCorners((prev) => {
       const next = prev.map((c) => (c.id === id ? { ...c, ...patch } : c));
@@ -312,9 +385,15 @@ export default function LotPlotterScreen() {
             const newCorners = parsed.map((p, idx) => ({
               id: `csv-${Date.now()}-${idx}`,
               line: idx + 1,
+              segmentType: p.segmentType ?? 'line',
+              curveRadius: p.curveRadius,
+              curveDelta: p.curveDelta,
+              curveChord: p.curveChord,
+              curveDirection: p.curveDirection,
               ns: p.ns,
               deg: p.deg,
               min: p.min,
+              sec: p.sec || '',
               ew: p.ew,
               distance: p.distance,
             }));
@@ -344,9 +423,11 @@ export default function LotPlotterScreen() {
         corners: lot.corners.map((p, idx) => ({
           id: `ocr-${ts}-${i}-${idx}`,
           line: idx + 1,
+          sheetLineLabel: p.sheetLineLabel,
           ns: p.ns,
           deg: p.deg,
           min: p.min,
+          sec: p.sec || '',
           ew: p.ew,
           distance: p.distance,
         })),
@@ -396,7 +477,7 @@ export default function LotPlotterScreen() {
       pendingScanLocationRef.current = null;
       setAutoTieMatchHint(
         slots.length > 1
-          ? `${slots.length} lots loaded — pick a lot below. Each lot’s line 1 is MON → corner 1.`
+          ? `${slots.length} lots loaded — pick a lot below. Row 1 = MON→C1; sheet LINE 1-2 starts at row 2.`
           : null
       );
     }
@@ -429,9 +510,26 @@ export default function LotPlotterScreen() {
   };
 
   const processOcrImage = async (uri: string) => {
+    if (ocrProgressTimerRef.current) {
+      clearInterval(ocrProgressTimerRef.current);
+      ocrProgressTimerRef.current = null;
+    }
+    if (ocrAbortRef.current) {
+      ocrAbortRef.current.abort();
+      ocrAbortRef.current = null;
+    }
+    const controller = new AbortController();
+    ocrAbortRef.current = controller;
     setIsOcrProcessing(true);
+    setOcrProgress(5);
+    ocrProgressTimerRef.current = setInterval(() => {
+      setOcrProgress((p) => {
+        if (p >= 92) return p;
+        return Math.min(92, p + (p < 40 ? 7 : p < 75 ? 4 : 2));
+      });
+    }, 550);
     try {
-      const { lots: extractedLots, meta } = await scanLandTitleImage(uri);
+      const { lots: extractedLots, meta } = await scanLandTitleImage(uri, controller.signal);
       const nonEmpty = extractedLots.filter((l) => l.corners.length > 0);
 
       if (nonEmpty.length > 0) {
@@ -443,14 +541,40 @@ export default function LotPlotterScreen() {
         const docTie = meta.tiePointReference?.trim();
         setReviewCatalogMatch(docTie ? findBestTiePointMatch(docTie) : null);
         setScanReviewVisible(true);
+        setOcrProgress(100);
       } else {
         Alert.alert('No Data Found', 'Could not detect any survey lines in the image. Please try a clearer image or add manually.');
       }
     } catch (error: any) {
-      Alert.alert('Scan Error', error.message || 'Failed to process the image.');
+      const isAborted =
+        error?.name === 'AbortError' || String(error?.message || '').toLowerCase().includes('aborted');
+      if (!isAborted) {
+        Alert.alert('Scan Error', error.message || 'Failed to process the image.');
+      }
     } finally {
+      if (ocrProgressTimerRef.current) {
+        clearInterval(ocrProgressTimerRef.current);
+        ocrProgressTimerRef.current = null;
+      }
+      if (ocrAbortRef.current === controller) {
+        ocrAbortRef.current = null;
+      }
       setIsOcrProcessing(false);
+      setOcrProgress(0);
     }
+  };
+
+  const handleCancelOcr = () => {
+    if (ocrAbortRef.current) {
+      ocrAbortRef.current.abort();
+      ocrAbortRef.current = null;
+    }
+    if (ocrProgressTimerRef.current) {
+      clearInterval(ocrProgressTimerRef.current);
+      ocrProgressTimerRef.current = null;
+    }
+    setIsOcrProcessing(false);
+    setOcrProgress(0);
   };
 
   const handleCamera = async () => {
@@ -464,11 +588,13 @@ export default function LotPlotterScreen() {
 
     const result = await ImagePicker.launchCameraAsync({
       mediaTypes: ['images'],
+      allowsEditing: true,
       quality: 0.8,
     });
 
     if (!result.canceled && result.assets && result.assets.length > 0) {
-      processOcrImage(result.assets[0].uri);
+      setPendingImageUri(result.assets[0].uri);
+      setPendingImageSource('camera');
     }
   };
 
@@ -483,12 +609,30 @@ export default function LotPlotterScreen() {
 
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
+      allowsEditing: true,
       quality: 0.8,
     });
 
     if (!result.canceled && result.assets && result.assets.length > 0) {
-      processOcrImage(result.assets[0].uri);
+      setPendingImageUri(result.assets[0].uri);
+      setPendingImageSource('gallery');
     }
+  };
+
+  const handleRetakeOrReselect = async () => {
+    if (pendingImageSource === 'camera') {
+      await handleCamera();
+      return;
+    }
+    await handleGallery();
+  };
+
+  const handleConfirmAnalyzeImage = async () => {
+    if (!pendingImageUri) return;
+    const uri = pendingImageUri;
+    setPendingImageUri(null);
+    setPendingImageSource(null);
+    await processOcrImage(uri);
   };
 
   /** Recompute lot geometry from current tie point + corners (no separate Done button). */
@@ -500,13 +644,21 @@ export default function LotPlotterScreen() {
     generatePolygon(corners);
   };
 
+  useEffect(() => {
+    if (corners.length >= 3) {
+      generatePolygon(corners);
+    }
+  }, [bearingCorrection]);
+
   const exportCornerRows: LotCornerRow[] = useMemo(
     () =>
       corners.map((c) => ({
         line: c.line,
+        sheetLineLabel: c.sheetLineLabel,
         ns: c.ns,
         deg: c.deg,
         min: c.min,
+        sec: c.sec,
         ew: c.ew,
         distance: c.distance,
       })),
@@ -586,6 +738,7 @@ export default function LotPlotterScreen() {
     setReviewCatalogMatch(null);
     pendingScanLocationRef.current = null;
     setShowMap(false);
+    setShowAllMap(false);
   };
 
   const mapPolygon = polygon
@@ -595,6 +748,44 @@ export default function LotPlotterScreen() {
         fillColor: '#3b5998',
       }
     : null;
+
+  const mapPolygons = useMemo(() => {
+    if (!importedLots || importedLots.length < 2 || !selectedTiePoint) return null;
+    const correction = Number.isFinite(parseFloat(bearingCorrection)) ? parseFloat(bearingCorrection) : 0;
+    const out: Array<{ coordinates: [number, number][]; color: string; fillColor: string }> = [];
+    importedLots.forEach((slot, idx) => {
+      if (!slot?.corners?.length || slot.corners.length < 3) return;
+      try {
+        const boundaries = slot.corners.map((corner) => ({
+          id: corner.id,
+          bearing: formatBearing(corner.ns, corner.deg, corner.min, corner.ew, corner.sec),
+          distance: parseFloat(corner.distance) || 0,
+          segmentType: corner.segmentType ?? 'line',
+          curveRadius: parseFloat(corner.curveRadius || '') || undefined,
+          curveDelta: parseFloat(corner.curveDelta || '') || undefined,
+          curveChord: parseFloat(corner.curveChord || '') || undefined,
+          curveDirection: corner.curveDirection,
+          isTiePoint: corner.line === 1,
+        }));
+        const coordinates = gisUtils.generateLotPolygonFromTraverse(
+          selectedTiePoint.lat,
+          selectedTiePoint.lon,
+          boundaries,
+          selectedTiePoint.x,
+          selectedTiePoint.y,
+          selectedTiePoint.zone,
+          correction
+        ) as [number, number][];
+        if (coordinates.length >= 4) {
+          const color = MULTI_POLYGON_COLORS[idx % MULTI_POLYGON_COLORS.length];
+          out.push({ coordinates, color, fillColor: color });
+        }
+      } catch (error) {
+        console.warn('Failed to build polygon for imported lot', slot.id, error);
+      }
+    });
+    return out.length ? out : null;
+  }, [importedLots, selectedTiePoint, bearingCorrection]);
 
   return (
     <View style={[styles.container, { backgroundColor: colors.contentBg }]}>
@@ -732,7 +923,8 @@ export default function LotPlotterScreen() {
               <Text style={[styles.docTieBannerLabel, { color: colors.textMuted }]}>Tie from scanned document</Text>
               <Text style={[styles.docTieBannerText, { color: colors.text }]}>{documentTieFromScan}</Text>
               <Text style={[styles.docTieBannerHint, { color: colors.textMuted }]}>
-                Match this to the map tie point above when possible. Line 1 in the table is from this monument to corner 1.
+                Match this to the map tie point above when possible. Table row 1 = sheet column MON. TO CORNER 1. Row 2 =
+                first bearing in LINE 1-2 (sheet “line 1-2” is not app row 1).
               </Text>
             </View>
           ) : null}
@@ -779,12 +971,17 @@ export default function LotPlotterScreen() {
           {csvSectionExpanded && (
             <>
               <View style={styles.uploadRow}>
-                <TouchableOpacity style={[styles.chooseFileBtn, { backgroundColor: colors.cardBg }]} onPress={() => setScanModalVisible(true)} disabled={isOcrProcessing}>
-                  <Ionicons name="cloud-upload-outline" size={14} color="#3b5998" style={{ marginRight: 4 }} />
-                  <Text style={styles.chooseFileBtnText}>Upload File</Text>
-                </TouchableOpacity>
-
-                {isOcrProcessing && <ActivityIndicator size="small" color="#3b5998" />}
+                {!isOcrProcessing ? (
+                  <TouchableOpacity style={[styles.chooseFileBtn, { backgroundColor: colors.cardBg }]} onPress={() => setScanModalVisible(true)}>
+                    <Ionicons name="cloud-upload-outline" size={14} color="#3b5998" style={{ marginRight: 4 }} />
+                    <Text style={styles.chooseFileBtnText}>Upload File</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity style={[styles.chooseFileBtn, styles.cancelOcrBtn, { backgroundColor: colors.cardBg }]} onPress={handleCancelOcr}>
+                    <Ionicons name="close-circle-outline" size={14} color="#8e1616" style={{ marginRight: 4 }} />
+                    <Text style={styles.cancelOcrBtnText}>Cancel</Text>
+                  </TouchableOpacity>
+                )}
 
                 {csvFile && !isOcrProcessing ? (
                   <View style={styles.fileNameContainer}>
@@ -807,9 +1004,16 @@ export default function LotPlotterScreen() {
                     </TouchableOpacity>
                   </View>
                 ) : (
-                  <Text style={[styles.fileName, { color: colors.text }]} numberOfLines={2}>
-                    {isOcrProcessing ? 'Analyzing Image...' : 'No file chosen'}
-                  </Text>
+                  <View style={styles.progressWrap}>
+                    <Text style={[styles.fileName, { color: colors.text }]} numberOfLines={2}>
+                      {isOcrProcessing ? `Analyzing Image... ${ocrProgress}%` : 'No file chosen'}
+                    </Text>
+                    {isOcrProcessing ? (
+                      <View style={[styles.progressBarTrack, { backgroundColor: colors.border }]}>
+                        <View style={[styles.progressBarFill, { width: `${ocrProgress}%` }]} />
+                      </View>
+                    ) : null}
+                  </View>
                 )}
               </View>
             </>
@@ -819,7 +1023,27 @@ export default function LotPlotterScreen() {
         {/* Data Table Section */}
         <View style={[styles.section, { backgroundColor: colors.cardBg, borderColor: colors.border }]}>
           <View style={[styles.dataTableSectionHeader, { backgroundColor: colors.contentBg, borderBottomColor: colors.border }]}>
-            <Text style={[styles.dataTableSectionHeaderText, { color: colors.text }]}>Tie Point to Corner 1</Text>
+            <Text style={[styles.dataTableSectionHeaderText, { color: colors.text }]}>Survey traverse</Text>
+            <Text style={[styles.dataTableSectionHint, { color: colors.textMuted }]}>
+              Row 1 = sheet <Text style={{ fontWeight: '800', color: colors.text }}>MON. TO CORNER 1</Text>. The LINE column
+              shows <Text style={{ fontWeight: '800', color: colors.text }}>MON→C1</Text>, then{' '}
+              <Text style={{ fontWeight: '800', color: colors.text }}>1–2</Text>, <Text style={{ fontWeight: '800', color: colors.text }}>2–3</Text>,{' '}
+              <Text style={{ fontWeight: '800', color: colors.text }}>3–4</Text>, … by traverse order. Stacked values in one
+              sheet cell become consecutive rows. You can override this with custom segment/curve labels. CSV also supports
+              curve rows via: <Text style={{ fontWeight: '800', color: colors.text }}>SegmentType=curve</Text>, Radius, Delta
+              (deg), CurveDir(L/R), and optional Chord.
+            </Text>
+            <View style={styles.bearingAdjustRow}>
+              <Text style={[styles.bearingAdjustLabel, { color: colors.textMuted }]}>Bearing correction (deg)</Text>
+              <TextInput
+                style={[styles.bearingAdjustInput, { backgroundColor: colors.contentBg, color: colors.text, borderColor: colors.border }]}
+                value={bearingCorrection}
+                onChangeText={(t) => setBearingCorrection(t.replace(/[^0-9.\-]/g, ''))}
+                keyboardType="decimal-pad"
+                placeholder="0"
+                placeholderTextColor={colors.textMuted}
+              />
+            </View>
           </View>
 
           {importedLots && importedLots.length > 1 ? (
@@ -859,20 +1083,29 @@ export default function LotPlotterScreen() {
             <View style={{ minWidth: 320, flex: 1 }}>
               {/* Table Header Row */}
               <View style={[styles.dataTableHeader, { backgroundColor: colors.contentBg, borderBottomColor: colors.border }]}>
-                <View style={styles.colLine}><Text style={[styles.dataTableHeaderText, { color: colors.text }]}>Line</Text></View>
+                <View style={styles.colLine}><Text style={[styles.dataTableHeaderText, { color: colors.text }]}>LEG/CURVE</Text></View>
                 <View style={styles.colDir}><Text style={[styles.dataTableHeaderText, { color: colors.text }]}>NS</Text></View>
                 <View style={styles.colDegMin}><Text style={[styles.dataTableHeaderText, { color: colors.text }]}>Deg</Text></View>
                 <View style={styles.colDegMin}><Text style={[styles.dataTableHeaderText, { color: colors.text }]}>Min</Text></View>
+                <View style={styles.colDegMin}><Text style={[styles.dataTableHeaderText, { color: colors.text }]}>Sec</Text></View>
                 <View style={styles.colDir}><Text style={[styles.dataTableHeaderText, { color: colors.text }]}>EW</Text></View>
                 <View style={styles.colDist}><Text style={[styles.dataTableHeaderText, { color: colors.text }]}>Distance</Text></View>
-                <View style={styles.colDel}><Text style={styles.dataTableHeaderText}></Text></View>
+                <View style={styles.colDel}><Text style={styles.dataTableHeaderText}>+/-</Text></View>
               </View>
 
               {/* Existing corners */}
               {corners.map((corner) => (
                 <View key={corner.id} style={[styles.dataTableRow, { borderBottomColor: colors.border }]}>
                   <View style={styles.colLine}>
-                    <Text style={[styles.dataTableCell, { color: colors.text }]}>{corner.line}</Text>
+                    <TextInput
+                      style={[styles.tableInput, styles.lineLabelInput, { backgroundColor: colors.contentBg, color: colors.text, borderColor: colors.border }]}
+                      placeholder={formatSurveyLegSheetLabel(corner.line)}
+                      placeholderTextColor={colors.textMuted}
+                      value={corner.sheetLineLabel ?? ''}
+                      onChangeText={(t) => updateCorner(corner.id, { sheetLineLabel: t })}
+                      autoCapitalize="characters"
+                      maxLength={24}
+                    />
                   </View>
                   
                   <View style={styles.colDir}>
@@ -916,6 +1149,18 @@ export default function LotPlotterScreen() {
                     />
                   </View>
 
+                  <View style={styles.colDegMin}>
+                    <TextInput
+                      style={[styles.tableInput, { backgroundColor: colors.contentBg, color: colors.text, borderColor: colors.border }]}
+                      placeholder="0"
+                      placeholderTextColor={colors.textMuted}
+                      value={corner.sec || ''}
+                      onChangeText={(t) => updateCorner(corner.id, { sec: t.replace(/[^0-9]/g, '') })}
+                      keyboardType="number-pad"
+                      maxLength={2}
+                    />
+                  </View>
+
                   <View style={styles.colDir}>
                     <View style={[styles.directionToggle, { backgroundColor: colors.contentBg }]}>
                       <TouchableOpacity
@@ -945,9 +1190,22 @@ export default function LotPlotterScreen() {
                   </View>
 
                   <View style={styles.colDel}>
-                    <TouchableOpacity onPress={() => deleteCorner(corner.id)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                      <Text style={styles.deleteX}>×</Text>
-                    </TouchableOpacity>
+                    <View style={styles.rowActionsCol}>
+                      <TouchableOpacity
+                        onPress={() => addSubcornerAfter(corner.id)}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        accessibilityLabel="Add subcorner after this row"
+                      >
+                        <Text style={styles.addSubcornerPlus}>+</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={() => deleteCorner(corner.id)}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        accessibilityLabel="Delete row"
+                      >
+                        <Text style={styles.deleteX}>×</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
                 </View>
               ))}
@@ -971,6 +1229,11 @@ export default function LotPlotterScreen() {
             >
               <Text style={styles.yellowBtnText}>View Map</Text>
             </TouchableOpacity>
+            {mapPolygons && mapPolygons.length > 1 ? (
+              <TouchableOpacity style={styles.yellowBtn} onPress={() => setShowAllMap(true)}>
+                <Text style={styles.yellowBtnText}>View All</Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
           
           <View style={styles.actionButtonGroup}>
@@ -1102,6 +1365,15 @@ export default function LotPlotterScreen() {
         showAreaLabel={true}
       />
 
+      <MapModal
+        visible={showAllMap && !!mapPolygons && mapPolygons.length > 1}
+        onClose={() => setShowAllMap(false)}
+        center={center}
+        zoom={17}
+        polygons={mapPolygons}
+        showAreaLabel={false}
+      />
+
       <ScanReviewModal
         visible={scanReviewVisible}
         lots={reviewLots}
@@ -1209,6 +1481,56 @@ export default function LotPlotterScreen() {
               <TouchableOpacity style={[styles.scanActionBtn, { backgroundColor: colors.contentBg, borderColor: colors.border }]} onPress={() => { setScanModalVisible(false); handleChooseFile(); }}>
                 <Ionicons name="document-text-outline" size={32} color="#3b5998" />
                 <Text style={[styles.scanActionText, { color: colors.text }]}>Upload CSV</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Image Preview + Confirm (after crop) before OCR analyze */}
+      <Modal
+        visible={!!pendingImageUri}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          setPendingImageUri(null);
+          setPendingImageSource(null);
+        }}
+      >
+        <View style={styles.scanModalOverlay}>
+          <View style={[styles.scanModalContent, { backgroundColor: colors.cardBg, maxWidth: 520 }]}>
+            <View style={styles.scanModalHeader}>
+              <Text style={[styles.scanModalTitle, { color: colors.text }]}>Review Image</Text>
+              <TouchableOpacity
+                onPress={() => {
+                  setPendingImageUri(null);
+                  setPendingImageSource(null);
+                }}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Ionicons name="close" size={24} color={colors.text} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.scanModalDesc}>
+              Crop/adjust your photo first, then tap OK to proceed with image analysis.
+            </Text>
+
+            {pendingImageUri ? (
+              <Image source={{ uri: pendingImageUri }} style={styles.previewImage} resizeMode="contain" />
+            ) : null}
+
+            <View style={styles.previewActionRow}>
+              <TouchableOpacity
+                style={[styles.chooseFileBtn, { backgroundColor: colors.contentBg }]}
+                onPress={handleRetakeOrReselect}
+              >
+                <Ionicons name="crop-outline" size={16} color="#3b5998" style={{ marginRight: 6 }} />
+                <Text style={styles.chooseFileBtnText}>Crop / Change</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.yellowBtn} onPress={handleConfirmAnalyzeImage}>
+                <Text style={styles.yellowBtnText}>OK Analyze</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -1553,6 +1875,29 @@ const styles = StyleSheet.create({
     fontSize: 12,
     flex: 1,
   },
+  progressWrap: {
+    flex: 1,
+    minWidth: 160,
+  },
+  progressBarTrack: {
+    width: '100%',
+    height: 8,
+    borderRadius: 6,
+    overflow: 'hidden',
+    marginTop: 6,
+  },
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: '#3b5998',
+  },
+  cancelOcrBtn: {
+    borderColor: '#8e1616',
+  },
+  cancelOcrBtnText: {
+    color: '#8e1616',
+    fontSize: 12,
+    fontWeight: '700',
+  },
   checkboxRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1624,6 +1969,36 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: 'bold',
   },
+  dataTableSectionHint: {
+    fontSize: 11,
+    marginTop: 8,
+    lineHeight: 16,
+  },
+  bearingAdjustRow: {
+    marginTop: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  bearingAdjustLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  bearingAdjustInput: {
+    borderWidth: 1,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    minWidth: 84,
+    textAlign: 'center',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  dataTableLineCol: {
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 15,
+  },
   dataTableHeader: {
     flexDirection: 'row',
     paddingVertical: 8,
@@ -1642,11 +2017,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     borderBottomWidth: 1,
   },
-  colLine: { flex: 0.5, alignItems: 'center', justifyContent: 'center' },
+  colLine: { flex: 0.62, minWidth: 44, alignItems: 'center', justifyContent: 'center' },
   colDir: { flex: 0.8, alignItems: 'center', justifyContent: 'center' },
   colDegMin: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 2 },
   colDist: { flex: 1.5, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 2 },
-  colDel: { flex: 0.5, alignItems: 'center', justifyContent: 'center' },
+  colDel: { flex: 0.6, alignItems: 'center', justifyContent: 'center' },
+  rowActionsCol: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+  },
+  addSubcornerPlus: {
+    color: '#2563eb',
+    fontSize: 18,
+    fontWeight: 'bold',
+    paddingHorizontal: 4,
+    paddingVertical: 0,
+    lineHeight: 18,
+  },
   dataTableCell: {
     fontSize: 13,
   },
@@ -1690,6 +2078,12 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     borderWidth: 1,
     width: '100%',
+  },
+  lineLabelInput: {
+    fontSize: 11,
+    fontWeight: '700',
+    paddingHorizontal: 3,
+    minHeight: 40,
   },
   bottomButtons: {
     flexDirection: 'row',
@@ -1788,6 +2182,19 @@ const styles = StyleSheet.create({
     marginTop: 8,
     fontSize: 14,
     fontWeight: '600',
+  },
+  previewImage: {
+    width: '100%',
+    height: 280,
+    borderRadius: 10,
+    backgroundColor: '#111',
+    marginBottom: 14,
+  },
+  previewActionRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 10,
   },
   exportModalDesc: {
     fontSize: 13,

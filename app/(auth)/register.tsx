@@ -15,6 +15,7 @@ import {
   useWindowDimensions,
   ImageBackground,
   Image,
+  ScrollView,
 } from 'react-native';
 import type { PublicUserJson } from '@/database/models';
 import { apiUrl } from '@/lib/api/api-url';
@@ -38,8 +39,9 @@ const LOGO_BALATAN = require('../../assets/images/balatan-icon.jpg');
 
 export default function RegisterScreen() {
   const router = useRouter();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
   const isWeb = width > 768; // Breakpoint for web/tablet
+  const isCompactMobile = !isWeb && height < 860;
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
@@ -83,14 +85,46 @@ export default function RegisterScreen() {
 
     setIsLoading(true);
     Keyboard.dismiss();
-    
-    // Mock API call
-    setTimeout(() => {
+
+    try {
+      const res = await fetch(apiUrl('/api/auth/register'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          firstName: firstName.trim(),
+          lastName: lastName.trim(),
+          email: email.trim(),
+          password,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        token?: string;
+        user?: PublicUserJson;
+        message?: string;
+      };
+
+      // If the API already issues a token, take the user straight in.
+      if (res.ok && data.success && data.token && data.user?.email) {
+        await setAuthSession(data.user.email, data.token);
+        router.replace('/section/lot-plotter');
+        return;
+      }
+
+      if (res.ok && data.success) {
+        Alert.alert('Success', 'Account created successfully! Please login.', [
+          { text: 'OK', onPress: () => router.push('/(auth)/login') },
+        ]);
+        return;
+      }
+
+      Alert.alert('Registration Failed', data.message || 'Could not create your account.');
+    } catch (e) {
+      console.error('Register failed', e);
+      Alert.alert('Registration Failed', 'Could not reach the server. Is Expo running and MySQL up?');
+    } finally {
       setIsLoading(false);
-      Alert.alert('Success', 'Account created successfully! Please login.', [
-        { text: 'OK', onPress: () => router.push('/(auth)/login') }
-      ]);
-    }, 1500);
+    }
   };
 
   const handleGoogleRegister = async () => {
@@ -164,37 +198,52 @@ export default function RegisterScreen() {
           style={styles.keyboardView}
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         >
-          <View style={[styles.mainLayout, isWeb ? styles.mainLayoutWeb : styles.mainLayoutMobile]}>
-            
-            {/* Left Side: Welcome Text */}
-            <View style={[styles.leftSection, isWeb && styles.leftSectionWeb]}>
-              <View style={styles.logoContainer}>
-                <Image source={LOGO_BALATAN} style={styles.largeLogo} resizeMode="contain" />
-              </View>
-              <Text style={styles.muniTitle}>MUNICIPALITY OF BALATAN</Text>
-              <Text style={styles.assessorTitle}>MUNICIPAL ASSESSOR&apos;S OFFICE</Text>
-              
-              <Text style={styles.welcomeText}>WELCOME</Text>
-
-              <Text style={styles.dateTimeText}>{currentDate}</Text>
-            </View>
-
-            {/* Right Side: Register Form */}
-            <View style={[styles.rightSection, isWeb && styles.rightSectionWeb]}>
-              <View style={styles.formContainer}>
+          <ScrollView
+            style={styles.authScroll}
+            contentContainerStyle={[styles.authScrollContent, !isWeb && styles.authScrollContentMobile]}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            <View
+              style={[
+                styles.mainLayout,
+                isWeb ? styles.mainLayoutWeb : styles.mainLayoutMobile,
+                isCompactMobile && styles.mainLayoutMobileCompact,
+              ]}
+            >
+              {/* Left Side: Welcome Text */}
+              <View style={[styles.leftSection, isWeb && styles.leftSectionWeb, isCompactMobile && styles.leftSectionCompact]}>
+                <View style={[styles.logoContainer, isCompactMobile && styles.logoContainerCompact]}>
+                  <Image source={LOGO_BALATAN} style={styles.largeLogo} resizeMode="contain" />
+                </View>
+                <Text style={[styles.muniTitle, isCompactMobile && styles.muniTitleCompact]}>MUNICIPALITY OF BALATAN</Text>
+                <Text style={[styles.assessorTitle, isCompactMobile && styles.assessorTitleCompact]}>MUNICIPAL ASSESSOR&apos;S OFFICE</Text>
                 
-                <View style={styles.formHeader}>
-                  <View style={styles.smallLogoPlaceholder}>
+                <Text style={[styles.welcomeText, isCompactMobile && styles.welcomeTextCompact]}>WELCOME</Text>
+
+                <Text style={[styles.dateTimeText, isCompactMobile && styles.dateTimeTextCompact]}>{currentDate}</Text>
+              </View>
+
+              {/* Right Side: Register Form */}
+              <View style={[styles.rightSection, isWeb && styles.rightSectionWeb]}>
+                <View style={[styles.formContainer, isCompactMobile && styles.formContainerCompact]}>
+                
+                <View style={[styles.formHeader, isCompactMobile && styles.formHeaderCompact]}>
+                  <View style={[styles.smallLogoPlaceholder, isCompactMobile && styles.smallLogoPlaceholderCompact]}>
                     <Image source={LOGO_IASSESS} style={styles.smallLogo} resizeMode="contain" />
                   </View>
-                  <Text style={styles.formHeaderText}>BALATAN MUNICIPAL{'\n'}ASSESSOR WEBSITE</Text>
+                  <Text style={[styles.formHeaderText, isCompactMobile && styles.formHeaderTextCompact]}>
+                    BALATAN MUNICIPAL{'\n'}ASSESSOR WEBSITE
+                  </Text>
                 </View>
 
-                <Text style={styles.formTitle}>CREATE ACCOUNT</Text>
-                <Text style={styles.formSubtitle}>Register to access online services</Text>
+                <Text style={[styles.formTitle, isCompactMobile && styles.formTitleCompact]}>CREATE ACCOUNT</Text>
+                <Text style={[styles.formSubtitle, isCompactMobile && styles.formSubtitleCompact]}>
+                  Register to access online services
+                </Text>
 
                 <View style={styles.row}>
-                  <View style={[styles.inputWrapper, { flex: 1, marginRight: 8 }]}>
+                  <View style={[styles.inputWrapper, isCompactMobile && styles.inputWrapperCompact, { flex: 1, marginRight: 8 }]}>
                     <View style={styles.inputIconContainer}>
                       <Ionicons name="person-outline" size={18} color="#666" />
                     </View>
@@ -209,7 +258,7 @@ export default function RegisterScreen() {
                       onBlur={() => setIsFirstNameFocused(false)}
                     />
                   </View>
-                  <View style={[styles.inputWrapper, { flex: 1, marginLeft: 8 }]}>
+                  <View style={[styles.inputWrapper, isCompactMobile && styles.inputWrapperCompact, { flex: 1, marginLeft: 8 }]}>
                     <View style={styles.inputIconContainer}>
                       <Ionicons name="person-outline" size={18} color="#666" />
                     </View>
@@ -226,7 +275,7 @@ export default function RegisterScreen() {
                   </View>
                 </View>
 
-                <View style={styles.inputWrapper}>
+                <View style={[styles.inputWrapper, isCompactMobile && styles.inputWrapperCompact]}>
                   <View style={styles.inputIconContainer}>
                     <Ionicons name="mail-outline" size={20} color="#666" />
                   </View>
@@ -245,7 +294,7 @@ export default function RegisterScreen() {
                   />
                 </View>
 
-                <View style={styles.inputWrapper}>
+                <View style={[styles.inputWrapper, isCompactMobile && styles.inputWrapperCompact]}>
                   <View style={styles.inputIconContainer}>
                     <Ionicons name="lock-closed-outline" size={20} color="#666" />
                   </View>
@@ -272,7 +321,7 @@ export default function RegisterScreen() {
                   </TouchableOpacity>
                 </View>
 
-                <View style={styles.inputWrapper}>
+                <View style={[styles.inputWrapper, isCompactMobile && styles.inputWrapperCompact]}>
                   <View style={styles.inputIconContainer}>
                     <Ionicons name="lock-closed-outline" size={20} color="#666" />
                   </View>
@@ -300,7 +349,7 @@ export default function RegisterScreen() {
                 </View>
 
                 <TouchableOpacity
-                  style={[styles.registerButton, isLoading && styles.registerButtonDisabled]}
+                  style={[styles.registerButton, isCompactMobile && styles.registerButtonCompact, isLoading && styles.registerButtonDisabled]}
                   onPress={handleRegister}
                   disabled={isLoading}
                 >
@@ -315,7 +364,7 @@ export default function RegisterScreen() {
                   <View style={styles.socialDividerLine} />
                 </View>
 
-                <View style={styles.socialButtonsRow}>
+                <View style={[styles.socialButtonsRow, isCompactMobile && styles.socialButtonsRowCompact]}>
                   <TouchableOpacity
                     style={[styles.socialButton, isLoading && styles.socialButtonDisabled]}
                     onPress={handleGoogleRegister}
@@ -342,8 +391,8 @@ export default function RegisterScreen() {
                 </View>
               </View>
             </View>
-
-          </View>
+            </View>
+          </ScrollView>
         </KeyboardAvoidingView>
 
         {/* Loading Overlay */}
@@ -378,6 +427,17 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  authScroll: {
+    width: '100%',
+    flex: 1,
+  },
+  authScrollContent: {
+    flexGrow: 1,
+    justifyContent: 'center',
+  },
+  authScrollContentMobile: {
+    justifyContent: 'flex-start',
+  },
   mainLayout: {
     flexDirection: 'row',
     width: '100%',
@@ -395,9 +455,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 40,
   },
+  mainLayoutMobileCompact: {
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+  },
   leftSection: {
     alignItems: 'center',
     marginBottom: 40,
+  },
+  leftSectionCompact: {
+    marginBottom: 18,
   },
   leftSectionWeb: {
     flex: 1,
@@ -420,6 +487,12 @@ const styles = StyleSheet.create({
     elevation: 5,
     overflow: 'hidden',
   },
+  logoContainerCompact: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    marginBottom: 10,
+  },
   largeLogo: {
     width: '100%',
     height: '100%',
@@ -435,6 +508,9 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     letterSpacing: 1.5,
   },
+  muniTitleCompact: {
+    fontSize: 14,
+  },
   assessorTitle: {
     fontSize: 18,
     fontWeight: 'bold',
@@ -442,6 +518,10 @@ const styles = StyleSheet.create({
     marginBottom: 24,
     letterSpacing: 1,
     textAlign: 'center',
+  },
+  assessorTitleCompact: {
+    fontSize: 15,
+    marginBottom: 14,
   },
   welcomeText: {
     fontSize: 36,
@@ -451,6 +531,9 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.5)',
     textShadowOffset: { width: 1, height: 1 },
     textShadowRadius: 3,
+  },
+  welcomeTextCompact: {
+    fontSize: 28,
   },
   subWelcomeText: {
     fontSize: 32,
@@ -468,6 +551,10 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     textAlign: 'center',
     lineHeight: 28,
+  },
+  dateTimeTextCompact: {
+    fontSize: 15,
+    lineHeight: 23,
   },
   rightSection: {
     width: '100%',
@@ -490,11 +577,18 @@ const styles = StyleSheet.create({
     shadowRadius: 20,
     elevation: 10,
   },
+  formContainerCompact: {
+    padding: 22,
+    maxWidth: 380,
+  },
   formHeader: {
     flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 30,
+  },
+  formHeaderCompact: {
+    marginBottom: 20,
   },
   smallLogoPlaceholder: {
     width: 80,
@@ -506,6 +600,12 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     overflow: 'hidden',
   },
+  smallLogoPlaceholderCompact: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    marginBottom: 8,
+  },
   smallLogo: {
     width: '100%',
     height: '100%',
@@ -516,6 +616,9 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     textAlign: 'center',
   },
+  formHeaderTextCompact: {
+    fontSize: 11,
+  },
   formTitle: {
     fontSize: 22,
     fontWeight: 'bold',
@@ -523,11 +626,19 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 8,
   },
+  formTitleCompact: {
+    fontSize: 20,
+    marginBottom: 6,
+  },
   formSubtitle: {
     fontSize: 13,
     color: COLORS.gray,
     textAlign: 'center',
     marginBottom: 30,
+  },
+  formSubtitleCompact: {
+    fontSize: 12,
+    marginBottom: 18,
   },
   row: {
     flexDirection: 'row',
@@ -546,6 +657,10 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 2,
+  },
+  inputWrapperCompact: {
+    height: 44,
+    marginBottom: 12,
   },
   inputIconContainer: {
     marginRight: 10,
@@ -578,6 +693,11 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 6,
     elevation: 4,
+  },
+  registerButtonCompact: {
+    height: 46,
+    marginTop: 8,
+    marginBottom: 14,
   },
   registerButtonDisabled: {
     backgroundColor: '#BDC3C7',
@@ -621,6 +741,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     marginBottom: 18,
+  },
+  socialButtonsRowCompact: {
+    marginBottom: 14,
   },
   socialButton: {
     flex: 1,

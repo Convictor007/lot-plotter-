@@ -92,6 +92,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       file_url: publicPath,
       file_size: buffer.length,
       mime_type: mime.slice(0, 128),
+      uploaded_by_user_id: auth.userId,
     });
 
     return Response.json(

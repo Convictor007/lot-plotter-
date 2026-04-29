@@ -4,8 +4,11 @@ export interface ParsedCorner {
   ns: string;
   deg: string;
   min: string;
+  sec?: string;
   ew: string;
   distance: string;
+  /** Source column label from LOT DESCRIPTIONS (e.g. MON→C1, 1-2, 2-3). */
+  sheetLineLabel?: string;
 }
 
 export type ScanReviewMeta = {
@@ -53,9 +56,17 @@ function normalizeLotsFromApiJson(json: Record<string, unknown>): ScannedLot[] |
       if (!item || typeof item !== 'object') continue;
       const row = item as Record<string, unknown>;
       const corners = Array.isArray(row.corners) ? (row.corners as ParsedCorner[]) : [];
-      const filtered = corners.filter(
-        (c) => c && typeof c.ns === 'string' && typeof c.ew === 'string' && String(c.distance || '').length > 0
-      );
+      const filtered = corners
+        .filter(
+          (c) => c && typeof c.ns === 'string' && typeof c.ew === 'string' && String(c.distance || '').length > 0
+        )
+        .map((c) => ({
+          ...c,
+          sheetLineLabel:
+            typeof c.sheetLineLabel === 'string' && c.sheetLineLabel.trim()
+              ? c.sheetLineLabel.trim()
+              : undefined,
+        }));
       if (filtered.length === 0) continue;
       const lotNo =
         row.lotNo === null || row.lotNo === undefined
@@ -77,18 +88,19 @@ function normalizeLotsFromApiJson(json: Record<string, unknown>): ScannedLot[] |
 }
 
 /** Gemini / Ollama vision via `/api/ocr-interpret` (server-side). */
-async function fetchOllamaInterpret(uri: string): Promise<ParsedCorner[] | null> {
-  const full = await fetchInterpretScan(uri);
+async function fetchOllamaInterpret(uri: string, signal?: AbortSignal): Promise<ParsedCorner[] | null> {
+  const full = await fetchInterpretScan(uri, signal);
   return full.ok && full.lots[0]?.corners?.length ? full.lots[0].corners : null;
 }
 
-async function fetchInterpretScan(uri: string): Promise<InterpretScanOk | InterpretScanFail> {
+async function fetchInterpretScan(uri: string, signal?: AbortSignal): Promise<InterpretScanOk | InterpretScanFail> {
   try {
     const formData = await buildImageFormDataAsync(uri);
     const res = await fetch('/api/ocr-interpret', {
       method: 'POST',
       headers: { Accept: 'application/json' },
       body: formData,
+      signal,
     });
 
     let json: any = null;
@@ -130,12 +142,13 @@ async function fetchInterpretScan(uri: string): Promise<InterpretScanOk | Interp
   }
 }
 
-async function fetchTesseractOcr(uri: string): Promise<ParsedCorner[]> {
+async function fetchTesseractOcr(uri: string, signal?: AbortSignal): Promise<ParsedCorner[]> {
   const formData = await buildImageFormDataAsync(uri);
   const res = await fetch('/api/ocr', {
     method: 'POST',
     headers: { Accept: 'application/json' },
     body: formData,
+    signal,
   });
 
   let json: any = null;
@@ -155,13 +168,13 @@ async function fetchTesseractOcr(uri: string): Promise<ParsedCorner[]> {
 /**
  * Prefer `/api/ocr-interpret` (Gemini or Ollama), then fall back to Tesseract `/api/ocr`.
  */
-export const extractCornersFromImage = async (uri: string): Promise<ParsedCorner[]> => {
+export const extractCornersFromImage = async (uri: string, signal?: AbortSignal): Promise<ParsedCorner[]> => {
   try {
-    const fromOllama = await fetchOllamaInterpret(uri);
+    const fromOllama = await fetchOllamaInterpret(uri, signal);
     if (fromOllama && fromOllama.length > 0) {
       return fromOllama;
     }
-    return await fetchTesseractOcr(uri);
+    return await fetchTesseractOcr(uri, signal);
   } catch (error) {
     console.error('OCR API Error: ', error);
     throw error;
@@ -176,13 +189,16 @@ const TESSERACT_REVIEW_WARNINGS = [
  * AI scan first (Gemini when `GEMINI_API_KEY` is set on the server), then Tesseract.
  * Use with a review modal before applying rows to the lot plotter.
  */
-export async function scanLandTitleImage(uri: string): Promise<{ lots: ScannedLot[]; meta: ScanReviewMeta }> {
-  const fromAi = await fetchInterpretScan(uri);
+export async function scanLandTitleImage(
+  uri: string,
+  signal?: AbortSignal
+): Promise<{ lots: ScannedLot[]; meta: ScanReviewMeta }> {
+  const fromAi = await fetchInterpretScan(uri, signal);
   if (fromAi.ok) {
     return { lots: fromAi.lots, meta: fromAi.meta };
   }
 
-  const corners = await fetchTesseractOcr(uri);
+  const corners = await fetchTesseractOcr(uri, signal);
   const warnings = [...TESSERACT_REVIEW_WARNINGS];
   if (fromAi.message) {
     warnings.unshift(`AI scan did not complete: ${fromAi.message}`);

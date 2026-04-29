@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { 
   View, 
   Text, 
@@ -6,45 +6,17 @@ import {
   ScrollView, 
   TouchableOpacity, 
   useWindowDimensions,
-  Platform
+  Platform,
+  ActivityIndicator,
+  RefreshControl,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useTheme } from '@/contexts/ThemeContext';
-
-// Mock data based on the transaction_requests schema
-const MOCK_REQUESTS = [
-  {
-    Transaction_id: 1,
-    reference_number: 'TXN-1713829102',
-    type: 'transfer_with_title',
-    status: 'under_review',
-    notes: 'Please process ASAP.',
-    assessor_notes: 'Checking the submitted CAR and Tax Declaration.',
-    submitted_at: '2026-04-18T10:30:00Z',
-    updated_at: '2026-04-19T14:20:00Z',
-  },
-  {
-    Transaction_id: 2,
-    reference_number: 'TXN-1713500000',
-    type: 'appraisal_land_first_time',
-    status: 'approved',
-    notes: 'First time declaration for newly inherited land.',
-    assessor_notes: 'All documents verified. Ready for tax payment.',
-    submitted_at: '2026-04-10T09:15:00Z',
-    updated_at: '2026-04-15T11:00:00Z',
-  },
-  {
-    Transaction_id: 3,
-    reference_number: 'TXN-1713200000',
-    type: 'certified_true_copy',
-    status: 'pending_documents',
-    notes: 'Need a copy for bank loan.',
-    assessor_notes: 'Please upload a clearer copy of your Valid ID. The current one is blurred.',
-    submitted_at: '2026-04-05T13:45:00Z',
-    updated_at: '2026-04-06T08:30:00Z',
-  }
-];
+import type { TransactionRequestRow, TransactionStatus } from '@/database/models';
+import { apiUrl } from '@/lib/api/api-url';
+import { getAuthToken } from '@/lib/authSession';
 
 // Helper to format transaction type to readable text
 const formatType = (type: string) => {
@@ -60,23 +32,21 @@ const formatType = (type: string) => {
 };
 
 // Helper to get status color and icon
-const getStatusConfig = (status: string) => {
+const getStatusConfig = (status: TransactionStatus | null | undefined) => {
   switch (status) {
-    case 'submitted': return { color: '#3498db', icon: 'paper-plane', label: 'Submitted' };
-    case 'under_review': return { color: '#f1c40f', icon: 'search', label: 'Under Review' };
-    case 'pending_documents': return { color: '#f39c12', icon: 'document-attach', label: 'Pending Documents' };
+    case 'pending': return { color: '#f39c12', icon: 'time', label: 'Pending' };
     case 'approved': return { color: '#2ecc71', icon: 'checkmark-circle', label: 'Approved' };
     case 'rejected': return { color: '#e74c3c', icon: 'close-circle', label: 'Rejected' };
-    case 'ready_for_payment': return { color: '#2ecc71', icon: 'cash', label: 'Ready for Payment' };
-    case 'completed': return { color: '#3b5998', icon: 'flag', label: 'Completed' };
-    case 'cancelled': return { color: '#666666', icon: 'ban', label: 'Cancelled' };
-    default: return { color: '#666666', icon: 'help-circle', label: 'Draft' };
+    case 'canceled': return { color: '#6b7280', icon: 'ban', label: 'Canceled' };
+    default: return { color: '#6b7280', icon: 'help-circle', label: 'Unknown' };
   }
 };
 
 // Helper to format date
-const formatDate = (dateString: string) => {
-  const date = new Date(dateString);
+const formatDate = (dateLike: string | Date | null | undefined) => {
+  if (!dateLike) return '—';
+  const date = typeof dateLike === 'string' ? new Date(dateLike) : dateLike;
+  if (Number.isNaN(date.getTime())) return '—';
   return date.toLocaleDateString('en-US', { 
     year: 'numeric', 
     month: 'short', 
@@ -93,6 +63,69 @@ export default function RequestScreen() {
   const { colors } = useTheme();
   
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [requests, setRequests] = useState<TransactionRequestRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const loadRequests = async (opts?: { silent?: boolean }) => {
+    const silent = Boolean(opts?.silent);
+    if (!silent) setLoading(true);
+    setNotice(null);
+    try {
+      const token = await getAuthToken();
+      if (!token) {
+        setRequests([]);
+        setNotice('Sign in required to view your requests.');
+        return;
+      }
+      const res = await fetch(apiUrl('/api/transaction-requests'), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const json = (await res.json().catch(() => ({}))) as { success?: boolean; data?: TransactionRequestRow[]; code?: string; message?: string };
+      if (!res.ok || !json.success || !Array.isArray(json.data)) {
+        if (res.status === 503 && json.code === 'DB_NOT_CONFIGURED') {
+          setNotice('Database is not configured on the server yet.');
+        } else if (res.status === 401) {
+          setNotice('Session expired. Please sign in again.');
+        } else {
+          setNotice(json.message || `Failed to load requests (HTTP ${res.status}).`);
+        }
+        setRequests([]);
+        return;
+      }
+      setRequests(json.data);
+    } catch (e) {
+      console.error('Failed to load requests', e);
+      setNotice('Network error while loading requests.');
+      setRequests([]);
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadRequests();
+  }, []);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await loadRequests({ silent: true });
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const hasRequests = requests.length > 0;
+  const sortedRequests = useMemo(() => {
+    return [...requests].sort((a, b) => {
+      const ad = a.submitted_at ? new Date(a.submitted_at as any).getTime() : 0;
+      const bd = b.submitted_at ? new Date(b.submitted_at as any).getTime() : 0;
+      if (bd !== ad) return bd - ad;
+      return (b.Transaction_id ?? 0) - (a.Transaction_id ?? 0);
+    });
+  }, [requests]);
 
   const toggleExpand = (id: number) => {
     setExpandedId(expandedId === id ? null : id);
@@ -114,14 +147,27 @@ export default function RequestScreen() {
         </TouchableOpacity>
       </View>
 
-      <ScrollView style={styles.scrollContainer} contentContainerStyle={styles.scrollContent}>
+      <ScrollView
+        style={styles.scrollContainer}
+        contentContainerStyle={styles.scrollContent}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+      >
         <View style={[styles.mainWrapper, isWeb && styles.mainWrapperWeb]}>
           
-          {MOCK_REQUESTS.length === 0 ? (
+          {loading ? (
+            <View style={styles.loadingState}>
+              <ActivityIndicator size="large" color={colors.textMuted} />
+              <Text style={[styles.loadingText, { color: colors.textMuted }]}>Loading your requests...</Text>
+            </View>
+          ) : !hasRequests ? (
             <View style={styles.emptyState}>
               <Ionicons name="document-text-outline" size={64} color={colors.textMuted} />
-              <Text style={[styles.emptyStateTitle, { color: colors.text }]}>No Requests Found</Text>
-              <Text style={[styles.emptyStateSub, { color: colors.textMuted }]}>You haven't submitted any transaction requests yet.</Text>
+              <Text style={[styles.emptyStateTitle, { color: colors.text }]}>
+                {notice ? 'Unable to Load Requests' : 'No Requests Found'}
+              </Text>
+              <Text style={[styles.emptyStateSub, { color: colors.textMuted }]}>
+                {notice || "You haven't submitted any transaction requests yet."}
+              </Text>
               <TouchableOpacity 
                 style={styles.emptyStateBtn}
                 onPress={() => router.push('/(main)/section/new-request')}
@@ -130,7 +176,7 @@ export default function RequestScreen() {
               </TouchableOpacity>
             </View>
           ) : (
-            MOCK_REQUESTS.map((request) => {
+            sortedRequests.map((request) => {
               const statusConfig = getStatusConfig(request.status);
               const isExpanded = expandedId === request.Transaction_id;
 
@@ -155,10 +201,14 @@ export default function RequestScreen() {
                   </View>
 
                   <View style={styles.cardBody}>
-                    <Text style={styles.typeText}>{formatType(request.type)}</Text>
+                    <Text style={[styles.typeText, { color: colors.text }]}>
+                      {formatType(request.type || '')}
+                    </Text>
                     <View style={styles.dateRow}>
                       <Ionicons name="calendar-outline" size={14} color={colors.textMuted} />
-                      <Text style={[styles.dateText, { color: colors.textMuted }]}>Submitted: {formatDate(request.submitted_at)}</Text>
+                      <Text style={[styles.dateText, { color: colors.textMuted }]}>
+                        Submitted: {formatDate(request.submitted_at as any)}
+                      </Text>
                     </View>
                   </View>
 
@@ -168,7 +218,7 @@ export default function RequestScreen() {
                       
                       <View style={styles.detailRow}>
                         <Text style={[styles.detailLabel, { color: colors.textMuted }]}>Last Updated:</Text>
-                        <Text style={[styles.detailValue, { color: colors.text }]}>{formatDate(request.updated_at)}</Text>
+                        <Text style={[styles.detailValue, { color: colors.text }]}>{formatDate(request.updated_at as any)}</Text>
                       </View>
 
                       <View style={styles.detailRow}>
@@ -185,20 +235,6 @@ export default function RequestScreen() {
                           {request.assessor_notes || 'No remarks yet.'}
                         </Text>
                       </View>
-
-                      {request.status === 'pending_documents' && (
-                        <TouchableOpacity style={styles.actionBtn}>
-                          <Ionicons name="cloud-upload-outline" size={18} color="#fff" />
-                          <Text style={styles.actionBtnText}>Upload Missing Documents</Text>
-                        </TouchableOpacity>
-                      )}
-                      
-                      {request.status === 'approved' && (
-                        <TouchableOpacity style={[styles.actionBtn, { backgroundColor: '#2ecc71' }]}>
-                          <Ionicons name="print-outline" size={18} color="#fff" />
-                          <Text style={styles.actionBtnText}>View Assessment Printout</Text>
-                        </TouchableOpacity>
-                      )}
                     </View>
                   )}
 
@@ -437,5 +473,15 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: 'bold',
     fontSize: 14,
+  },
+  loadingState: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 60,
+  },
+  loadingText: {
+    marginTop: 12,
+    fontSize: 13,
+    fontWeight: '600',
   },
 });

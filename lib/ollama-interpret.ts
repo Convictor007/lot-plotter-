@@ -25,7 +25,8 @@ export const SURVEY_USER_PROMPT = `Look at the **entire** image (title page, mem
    - **claimant**: short text from CLAIMANT if visible, else null.
    - **corners**: array for **that lot only**, in order:
      - **First** object = bearing & distance from **MON. TO CORNER 1** (monument to first corner of **this** lot). Values differ per lot even when the monument is the same.
-     - Then each **LINE 1-2, 2-3, …** segment in order. If a cell has **two** bearings (two segments in one line column), include **two** objects in order.
+     - Include **sheetLineLabel** on each object: use "MON->C1" for monument-to-corner line, then the sheet column label like "1-2", "2-3", ...
+     - Then each **LINE 1-2, 2-3, …** segment in order. If a cell shows **two or more** bearings stacked vertically or on separate lines in the same column, that is still **one logical column** (e.g. LINE 1-2): those are **consecutive legs** along the boundary — output **one JSON corner object per leg**, in top-to-bottom reading order.
    Skip lots you cannot read; omit empty lots.
 
 **Return shape (choose one):**  
@@ -37,6 +38,7 @@ Rules:
 - "tiePointReference" is a string or **null** (JSON null), max one short phrase from the document.
 - "ns" must be exactly "N" or "S". "ew" must be exactly "E" or "W".
 - "deg" and "min" are integers. "distance" is a number (decimals allowed).
+- "sheetLineLabel" is optional but preferred when readable: "MON->C1", "1-2", "2-3", ...
 - Skip header rows. Omit lines you cannot read confidently; do not guess wildly.`;
 
 /** Strip ```json ... ``` wrappers some models still emit. */

@@ -75,6 +75,16 @@ export interface BoundaryPoint {
   id: string;
   bearing: string;
   distance: number;
+  /** Optional: mark this traverse leg as a circular curve segment. */
+  segmentType?: 'line' | 'curve';
+  /** Curve radius in meters (for circular arcs). */
+  curveRadius?: number;
+  /** Central angle (delta) in degrees, if known. */
+  curveDelta?: number;
+  /** Chord length in meters (if distance column stores arc length). */
+  curveChord?: number;
+  /** Arc turn direction from start->end chord orientation. */
+  curveDirection?: 'L' | 'R';
   latitude?: number;
   longitude?: number;
   isTiePoint: boolean;

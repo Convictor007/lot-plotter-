@@ -10,7 +10,6 @@ import { createTransaction, generateReferenceNumber } from '@/lib/repositories/t
 export async function POST(req: Request) {
   try {
     const body = (await req.json()) as {
-      userId?: string;
       type?: string;
       propertyId?: string;
       status?: string;
@@ -38,18 +37,24 @@ export async function POST(req: Request) {
       );
     }
 
-    if (isDbConfigured()) {
-      const auth = await getBearerAuth(req);
-      if (!auth) {
-        return Response.json(
-          {
-            success: false,
-            message:
-              'Unauthorized. Sign in via POST /api/auth/login and send Authorization: Bearer <token> with this request.',
-          },
-          { status: 401 }
-        );
-      }
+    if (!isDbConfigured()) {
+      return Response.json(
+        { success: false, code: 'DB_NOT_CONFIGURED', message: 'Database is not configured on the server.' },
+        { status: 503 }
+      );
+    }
+
+    const auth = await getBearerAuth(req);
+    if (!auth) {
+      return Response.json(
+        {
+          success: false,
+          message:
+            'Unauthorized. Sign in via POST /api/auth/login and send Authorization: Bearer <token> with this request.',
+        },
+        { status: 401 }
+      );
+    }
 
       const notesPayload = JSON.stringify({
         applicantName,
@@ -64,7 +69,7 @@ export async function POST(req: Request) {
         user_id: auth.userId,
         reference_number,
         type,
-        status: (status as TransactionStatus) || 'submitted',
+        status: (status as TransactionStatus) || 'pending',
         notes: notesPayload,
       });
 
@@ -81,20 +86,6 @@ export async function POST(req: Request) {
         },
         { status: 201 }
       );
-    }
-
-    const newTransactionId = `txn_${Date.now()}`;
-    return Response.json(
-      {
-        success: true,
-        message: 'Transaction request created successfully (demo mode — no database).',
-        data: {
-          id: newTransactionId,
-          ...body,
-        },
-      },
-      { status: 201 }
-    );
   } catch (error) {
     console.error('Error creating transaction:', error);
     return Response.json({ success: false, message: 'Internal server error' }, { status: 500 });
